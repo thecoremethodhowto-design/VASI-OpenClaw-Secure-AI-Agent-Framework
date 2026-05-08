@@ -1,0 +1,56 @@
+services:
+  ollama:
+    image: ollama/ollama:0.12.6
+    container_name: vasi-ollama-local
+    ports:
+      - "127.0.0.1:11434:11434"
+    environment:
+      # Ollama güvenlik ayarları
+      OLLAMA_KEEP_ALIVE: 5m
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    networks:
+      - vasi-network
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # GPU kullanımı (opsiyonel)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  vasi-core:
+    build: .
+    container_name: vasi-sandbox-guard
+    env_file: .env
+    volumes:
+      - ./workspace:/app/workspace
+    depends_on:
+      - ollama
+    environment:
+      # Docker network üzerinden Ollama'ya erişim
+      OLLAMA_HOST: http://ollama:11434
+      VASI_LOG_FILE: /tmp/vasi_audit.log
+    restart: unless-stopped
+    networks:
+      - vasi-network
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+
+networks:
+  vasi-network:
+    driver: bridge
+
+volumes:
+  ollama_data:
