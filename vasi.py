@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from ollama import Client
+from ollama import Client, ResponseError
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -28,6 +28,8 @@ WORKSPACE = Path(os.getenv("WORKSPACE_DIR", "/app/workspace")).resolve()
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://host.docker.internal:11434")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")  # Optional güvenlik
 LOG_FILE = Path(os.getenv("VASI_LOG_FILE", "/tmp/vasi_audit.log"))
+NOTES_FILE = os.getenv("VASI_NOTES_FILE", "NOTES.md")
+CHANNEL_STYLE_FILE = os.getenv("VASI_CHANNEL_STYLE_FILE", "channel_style.md")
 
 if not TOKEN:
     raise ValueError("❌ TELEGRAM_BOT_TOKEN env variable zorunludur!")
@@ -45,6 +47,12 @@ if OLLAMA_API_KEY:
 else:
     logger_setup_msg = f"⚠️ Ollama API Key ayarlanmamış (localhost ortamında güvenli)"
 
+LOCAL_OLLAMA_HOSTS = {"localhost", "127.0.0.1", "::1", "host.docker.internal", "ollama"}
+parsed_ollama_host = urlparse(OLLAMA_HOST)
+ollama_hostname = parsed_ollama_host.hostname or ""
+if not OLLAMA_API_KEY and ollama_hostname not in LOCAL_OLLAMA_HOSTS:
+    raise ValueError("❌ Uzak Ollama sunucusu için OLLAMA_API_KEY zorunludur!")
+
 ollama_client = Client(host=OLLAMA_HOST, headers=ollama_headers if ollama_headers else None)
 
 # ── LOGGING SETUP ────────────────────────────────────────────────────────────
@@ -57,31 +65,89 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger('vasi')
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext").setLevel(logging.INFO)
 
 # Log Ollama setup durumunu başta
 logger.debug(logger_setup_msg)
 
 # ── CONSTANTS ────────────────────────────────────────────────────────────────
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_CODE_CONTEXT_FILE_SIZE = 80 * 1024  # 80KB
 MAX_WEB_TIMEOUT = 10  # saniye
 MAX_WEB_BYTES = 2 * 1024 * 1024  # 2MB
 RATE_LIMIT_WINDOW = 60  # saniye
 RATE_LIMIT_REQUESTS = 20  # İstek sayısı
+ALLOWED_WRITE_EXTENSIONS = {".md", ".txt", ".json", ".yaml", ".yml", ".csv"}
 
 # ── RATE LIMITING ───────────────────────────────────────────────────────────
 USER_RATE_LIMITS = {}
 
 # ── MODEL KADROSU ──────────────────────────────────────────────────────────────
 MODELS = {
-    "gatekeeper": "qwen3:30b",
-    "strateji":   "command-r",
-    "teknik":     "gemma3:27b",
-    "kod":        "qwen3-coder:30b",
-    "gorsel":     "qwen3-vl:30b",
+    "gatekeeper": os.getenv("VASI_MODEL_GATEKEEPER", "llama3.1:8b"),
+    "strateji":   os.getenv("VASI_MODEL_STRATEJI", "llama3.1:8b"),
+    "teknik":     os.getenv("VASI_MODEL_TEKNIK", "llama3.1:8b"),
+    "kod":        os.getenv("VASI_MODEL_KOD", "qwen3-coder:30b"),
+    "gorsel":     os.getenv("VASI_MODEL_GORSEL", "llama3.1:8b"),
 }
 
 # ── ALLOWED TOOLS WHITELIST ────────────────────────────────────────────────────
 ALLOWED_TOOL_NAMES = {"skill_get_time", "skill_web_radar"}
+CODE_CONTEXT_FILES = (
+    "vasi.py",
+    "Dockerfile",
+    "docker-compose.yml",
+    "requirements.txt",
+    ".dockerignore",
+    ".gitignore",
+)
+CODE_REVIEW_GUARDRAILS = """Bilinen guvenlik gercekleri:
+- Gercek .env dosyasi kod baglamina dahil edilmez; .gitignore ve .dockerignore tarafindan korunur.
+- .env.example gercek sir icermez ve kod inceleme baglamina verilmez.
+- logger_setup_msg API key degerini degil, sadece var/yok durumunu soyler; bunu tek basina sir sizintisi sayma.
+- safe_path, resolve() + is_relative_to(WORKSPACE) kullandigi icin klasik '..' path traversal engellenir.
+- Workspace icinde alt klasor kullanimi bilincli olarak desteklenir; slash karakterini tek basina risk sayma.
+- Telegram reply_text icin parse_mode verilmedikce HTML/JS calismaz; plain text XSS bulgusu yazma.
+- is_safe_url zaten URL uzunlugu, protokol, hostname ve public IP kontrolu yapar; ayni kontrolleri tekrar onerme.
+- Yazma/ekleme/silme sadece .md, .txt, .json, .yaml, .yml ve .csv uzantilarinda calisir.
+- Model adlari .env/Docker environment ile sistem sahibi tarafindan belirlenir; Telegram kullanicisi model adini enjekte edemez.
+- Workspace icinde alt klasor desteklendigi icin '/' karakterini yasaklamak dogru onerme degildir.
+- Kullanicinin not icerigini sanitize etmek veri kaybidir; komut calistirma veya HTML parse yoksa guvenlik bulgusu sayma.
+- Komut girdisini alfanumerik karakterlere indirgemek dosya yollari, Turkce metin, JSON/YAML ve not kullanimini bozar.
+
+Bulgu kurali:
+- Sadece somut guvenlik acigi veya anlamli risk varsa oner.
+- Hardening/fazladan temizlik onerilerini 'acik' gibi sunma.
+- Her bulgu icin mevcut koddan net kanit ver.
+- Kanit guardrail ile celisiyorsa bulguyu cikarma.
+"""
+SECRET_KEYS = (
+    "TOKEN",
+    "API_KEY",
+    "SECRET",
+    "PASSWORD",
+    "PASS",
+    "AUTH",
+    "COOKIE",
+)
+
+HELP_TEXT = """Vasi aktif.
+
+Komutlar:
+/liste - Workspace dosyalarını listeler
+/oku <dosya> - Workspace içindeki dosyayı okur
+/yaz <dosya> | <icerik> - Onayla dosya yazar/üzerine yazar
+/ekle <dosya> | <icerik> - Onayla dosyaya tarihli ek yapar
+/sil <dosya> - Onayla dosyayı siler
+/fikir <fikir> - Fikri araştırır, onayla not dosyana ekler
+/tarzim <kanal tarzi> - YouTube kanal tarzını kaydeder
+/senaryo <konu> - Kanal tarzına göre senaryo, başlık, açıklama ve kapak önerir
+/kod <soru> - Workspace bağlamıyla kod yardımı verir
+/guvenlik - Mevcut güvenlik kontrollerini deterministik raporlar
+/rapor <konu> - Rapor taslağı üretir, onayla kaydeder
+"""
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 1. GÜVENLİK KATMANI
@@ -136,6 +202,50 @@ def safe_path(filename: str) -> Path | None:
     except Exception as e:
         logger.error(f"Path çözümleme hatası: {e}")
         return None
+
+def is_allowed_write_file(path: Path) -> bool:
+    return path.suffix.lower() in ALLOWED_WRITE_EXTENSIONS
+
+def mask_sensitive_line(line: str, filename: str) -> str:
+    if filename != ".env.example":
+        return line
+
+    upper = line.upper()
+    if not any(key in upper for key in SECRET_KEYS):
+        return line
+
+    for sep in ("=",):
+        if sep in line:
+            key, _ = line.split(sep, 1)
+            return f"{key}{sep} <masked>"
+    return line
+
+def read_project_file_for_context(filename: str) -> str:
+    path = Path(filename).resolve()
+    repo_root = Path(__file__).resolve().parent
+
+    try:
+        if not path.is_relative_to(repo_root):
+            return f"[{filename}] skipped: path disallowed"
+    except ValueError:
+        return f"[{filename}] skipped: path disallowed"
+
+    if not path.exists() or not path.is_file():
+        return f"[{filename}] missing"
+
+    if path.stat().st_size > MAX_CODE_CONTEXT_FILE_SIZE:
+        return f"[{filename}] skipped: file too large"
+
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        masked = "\n".join(mask_sensitive_line(line, filename) for line in lines)
+        return f"### {filename}\n```text\n{masked}\n```"
+    except Exception as e:
+        logger.warning(f"Kod bağlamı okunamadı: {filename} ({e})")
+        return f"[{filename}] skipped: read error"
+
+def build_code_context() -> str:
+    return "\n\n".join(read_project_file_for_context(filename) for filename in CODE_CONTEXT_FILES)
 
 def is_public_hostname(hostname: str) -> bool:
     """Hostname'in yalnizca public IP adreslerine cozuldugunu dogrular."""
@@ -265,6 +375,70 @@ def skill_web_radar(url: str) -> str:
         logger.error(f"❌ Web radar kritik hata: {e}", exc_info=True)
         return "Radar Hatasi: İçsel hata."
 
+def run_model_with_tools(
+    model: str,
+    user_prompt: str,
+    system_prompt: str | None = None,
+    options: dict | None = None,
+) -> str:
+    """Ollama modelini guvenli tool whitelist'i ile calistirir."""
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": user_prompt})
+
+    try:
+        response = ollama_client.chat(model=model, messages=messages, tools=OPENCLAW_TOOLS, options=options)
+    except ResponseError as e:
+        if getattr(e, "status_code", None) == 404:
+            return (
+                f"Model bulunamadı: {model}\n\n"
+                f"Önce şu komutla modeli indir:\n"
+                f"docker compose exec ollama ollama pull {model}"
+            )
+        logger.error(f"❌ Ollama model hatası: {e}", exc_info=True)
+        return f"Model hatası: {getattr(e, 'error', str(e))}"
+
+    message_data = response["message"]
+
+    if message_data.get("tool_calls"):
+        messages.append(message_data)
+        for tool in message_data["tool_calls"]:
+            func_name = tool["function"]["name"]
+            args = tool["function"].get("arguments") or {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    args = {}
+
+            if func_name not in ALLOWED_TOOL_NAMES:
+                logger.warning(f"🚫 Yetkisiz tool çağrısı: {func_name}")
+                tool_result = "Güvenlik: Bu araç kullanımı yasaktır."
+            elif func_name == "skill_get_time":
+                tool_result = skill_get_time()
+            elif func_name == "skill_web_radar":
+                tool_result = skill_web_radar(args.get("url", ""))
+            else:
+                tool_result = "Bilinmeyen arac."
+
+            messages.append({"role": "tool", "content": tool_result, "name": func_name})
+
+        try:
+            final_response = ollama_client.chat(model=model, messages=messages, options=options)
+        except ResponseError as e:
+            if getattr(e, "status_code", None) == 404:
+                return (
+                    f"Model bulunamadı: {model}\n\n"
+                    f"Önce şu komutla modeli indir:\n"
+                    f"docker compose exec ollama ollama pull {model}"
+                )
+            logger.error(f"❌ Ollama final yanıt hatası: {e}", exc_info=True)
+            return f"Model hatası: {getattr(e, 'error', str(e))}"
+        return final_response["message"].get("content", "")
+
+    return message_data.get("content", "")
+
 OPENCLAW_TOOLS = [
     {
         "type": "function",
@@ -330,6 +504,9 @@ def save_file(filename: str, content: str) -> str:
     if path is None:
         logger.warning(f"🚫 Dosya yazma engellendi: {filename}")
         return "Güvenlik: Engellendi."
+    if not is_allowed_write_file(path):
+        logger.warning(f"🚫 Desteklenmeyen dosya uzantısı: {filename}")
+        return "Güvenlik: Sadece .md, .txt, .json, .yaml, .yml ve .csv dosyaları yazılabilir."
     
     # File size kontrolü
     if len(content) > MAX_FILE_SIZE:
@@ -347,6 +524,87 @@ def save_file(filename: str, content: str) -> str:
     except Exception as e:
         logger.error(f"❌ Dosya yazma hatası: {e}")
         return "Hata: Dosya kaydedilemedi."
+
+def append_file(filename: str, content: str) -> str:
+    """Güvenli dosya ekleme - tarih/saat damgası ile."""
+    path = safe_path(filename)
+    if path is None:
+        logger.warning(f"🚫 Dosya ekleme engellendi: {filename}")
+        return "Güvenlik: Engellendi."
+    if not is_allowed_write_file(path):
+        logger.warning(f"🚫 Desteklenmeyen dosya uzantısı: {filename}")
+        return "Güvenlik: Sadece .md, .txt, .json, .yaml, .yml ve .csv dosyalarına ek yapılabilir."
+
+    stamped_content = (
+        f"\n\n---\n"
+        f"### {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"{content.strip()}\n"
+    )
+
+    current_size = path.stat().st_size if path.exists() and path.is_file() else 0
+    if current_size + len(stamped_content.encode("utf-8")) > MAX_FILE_SIZE:
+        logger.warning(f"📦 Dosya ekleme limiti aşıldı: {filename}")
+        return f"Hata: Dosya çok büyük olur (max {MAX_FILE_SIZE / 1024 / 1024:.0f}MB)."
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(stamped_content)
+        logger.info(f"➕ Dosyaya eklendi: {path.relative_to(WORKSPACE)}")
+        return f"'{filename}' dosyasına tarihli kayıt eklendi."
+    except PermissionError:
+        logger.error(f"🚫 Yazma izni yok: {filename}")
+        return "Hata: Dosya yazma izni yok."
+    except Exception as e:
+        logger.error(f"❌ Dosya ekleme hatası: {e}")
+        return "Hata: Dosyaya eklenemedi."
+
+def delete_file(filename: str) -> str:
+    """Güvenli dosya silme - sadece workspace icindeki normal dosyalar."""
+    path = safe_path(filename)
+    if path is None:
+        logger.warning(f"🚫 Dosya silme engellendi: {filename}")
+        return "Güvenlik: Engellendi."
+    if not is_allowed_write_file(path):
+        logger.warning(f"🚫 Desteklenmeyen dosya uzantısı silme isteği: {filename}")
+        return "Güvenlik: Sadece güvenli not/veri dosyaları silinebilir."
+
+    if path.name.startswith("."):
+        return "Güvenlik: Gizli/korumalı dosyalar silinemez."
+    if not path.exists():
+        return f"'{filename}' bulunamadi."
+    if not path.is_file():
+        return "Hata: Sadece dosya silinebilir."
+
+    try:
+        relative = path.relative_to(WORKSPACE)
+        path.unlink()
+        logger.warning(f"🗑️ Dosya silindi: {relative}")
+        return f"'{relative}' silindi."
+    except PermissionError:
+        logger.error(f"🚫 Silme izni yok: {filename}")
+        return "Hata: Dosya silme izni yok."
+    except Exception as e:
+        logger.error(f"❌ Dosya silme hatası: {e}")
+        return "Hata: Dosya silinemedi."
+
+def split_filename_and_content(text: str) -> tuple[str, str] | None:
+    if "|" not in text:
+        return None
+    filename, content = text.split("|", 1)
+    filename = filename.strip()
+    content = content.strip()
+    if not filename or not content:
+        return None
+    return filename, content
+
+def set_pending(context: ContextTypes.DEFAULT_TYPE, action: str, preview: str, **payload):
+    context.user_data["pending_action"] = {"action": action, **payload}
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Onayla", callback_data="pending:yes"),
+        InlineKeyboardButton("İptal", callback_data="pending:no")
+    ]])
+    return preview, keyboard
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 4. YÖNLENDİRME (ROUTING) VE BOT KOMUTLARI
@@ -367,13 +625,68 @@ def build_system_prompt(model: str) -> str:
         "Eger internetten veya gercek zamanli bir bilgi alman gerekirse yeteneklerini (tools) kullan."
     )
 
+def build_code_system_prompt(model: str) -> str:
+    return (
+        f"Sen Vasi'nin kod yardımı modusun. {model} motoruyla çalışıyorsun. "
+        "Türkçe, pratik ve proje bağlamına sadık yanıt ver. Kod inceleme disiplinin katı olsun. "
+        "Sadece verilen dosya içeriklerine dayan; bilmediğin şeyi biliyor gibi yazma. "
+        "Komut önerirken yıkıcı komutlar önerme. Gizli anahtar, token veya .env içeriği isteme. "
+        "Kod değişikliği gerekiyorsa önce güvenlik etkisini açıkla; botun otomatik dosya değiştirme yetkisi olmadığını belirt. "
+        "Yanlış dış servis URL'leri veya hayali API komutları uydurma. "
+        "Telegram reply_text parse_mode verilmedikçe HTML çalıştırmaz; bunu XSS diye sunma. "
+        "Yerel Ollama için http://localhost, http://host.docker.internal veya Docker içi http://ollama normal kabul edilir. "
+        "safe_path resolve()+is_relative_to() kullandığında '..' kontrolünü ayrıca önermek genelde yanlış pozitiftir. "
+        "Not dosyalarına HTML/JS yazılmasını tek başına XSS sayma; Telegram parse_mode yoksa metin olarak gönderilir. "
+        "Dosya adında '/' kullanımını risk sayma; workspace içinde alt klasör desteklenir. "
+        "Model adı env ile sistem sahibi tarafından verilir, Telegram kullanıcısı model seçemez; bunu enjeksiyon sayma. "
+        "Kullanıcı not içeriğini veya genel komut metnini sanitize etmeyi güvenlik bulgusu diye önerme; veri kaybı oluşturur. "
+        "Her bulgu için koddaki somut kanıtı belirt; kanıt yoksa önerme. "
+        "Bulgu yoksa bunu açıkça söyle ve yalnızca düşük öncelikli iyileştirmeleri ayrı bölümde ver."
+    )
+
+def build_security_report() -> str:
+    ollama_host = urlparse(OLLAMA_HOST).hostname or ""
+    ollama_scope = "yerel/izinli" if ollama_host in LOCAL_OLLAMA_HOSTS else "uzak"
+    api_key_state = "var" if bool(OLLAMA_API_KEY) else "yok"
+
+    return f"""# Vasi Güvenlik Durumu
+
+## Aktif Kontroller
+- Yetkilendirme: Sadece `MY_TELEGRAM_ID` ile eşleşen kullanıcı kabul edilir.
+- Chat sınırı: Grup mesajları ve yönlendirilen mesajlar reddedilir.
+- Rate limit: Kullanıcı başına {RATE_LIMIT_WINDOW} saniyede {RATE_LIMIT_REQUESTS} istek sınırı var.
+- Workspace sınırı: Dosya yolları `resolve()` + `is_relative_to(WORKSPACE)` ile workspace dışına çıkamaz.
+- Yazma/silme sınırı: Sadece {", ".join(sorted(ALLOWED_WRITE_EXTENSIONS))} uzantıları desteklenir.
+- Silme sınırı: Klasörler ve gizli dosyalar silinmez.
+- Yazma onayı: `/yaz`, `/ekle`, `/sil`, `/fikir`, `/senaryo`, `/rapor` işlemleri Telegram onay butonu ister.
+- SSRF koruması: Web aracı sadece `http/https`, public hostname/IP, redirect kapalı ve {MAX_WEB_BYTES // 1024 // 1024}MB yanıt limitiyle çalışır.
+- Tool whitelist: Model sadece {", ".join(sorted(ALLOWED_TOOL_NAMES))} araçlarını çağırabilir.
+- Docker hardening: `read_only`, `tmpfs /tmp`, `no-new-privileges`, `cap_drop: ALL` compose dosyasında tanımlı.
+- Sır koruması: `.env` git/docker ignore içinde; loglarda `httpx` Telegram URL logları susturuldu.
+- Ollama host: `{OLLAMA_HOST}` ({ollama_scope}); API key durumu: {api_key_state}. Uzak host key olmadan başlatılmaz.
+
+## Gerçekçi Sıradaki İyileştirmeler
+1. Otomatik test ekle: `safe_path`, `is_safe_url`, yazma uzantısı, onay akışı için küçük unit testler.
+2. Log rotasyonu ekle: Uzun süreli kullanımda `/tmp/vasi_audit.log` veya host logları büyümesin.
+3. Pending işlem süresi ekle: Onay bekleyen işlem 5-10 dakika sonra otomatik iptal olsun.
+4. Web radar allowlist opsiyonu ekle: İstersen sadece belirli domainlerde araştırma yapabilsin.
+5. Komut denetim izi ekle: Hangi komutun ne zaman çalıştığını içerik sızdırmadan kısa audit kaydı olarak tut.
+
+## Not
+Bu rapor model tarafından tahmin edilmez; mevcut kod sabitlerinden ve güvenlik ayarlarından üretilir.
+"""
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update): return
     if not check_rate_limit(str(update.effective_user.id)):
         await update.message.reply_text("⚠️ Çok hızlı istek gönderdiz. Lütfen bekleyiniz.")
         return
     logger.info(f"👤 Başlangıç komutu: {update.effective_user.id}")
-    await update.message.reply_text("Vasi aktif. OpenClaw modulleri devrede. /liste ile workspace'i gorebilirsiniz.")
+    await update.message.reply_text(HELP_TEXT)
+
+async def cmd_yardim(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update): return
+    await update.message.reply_text(HELP_TEXT)
 
 async def cmd_liste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update): return
@@ -382,6 +695,216 @@ async def cmd_liste(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     logger.info(f"📋 Liste komutu: {update.effective_user.id}")
     await update.message.reply_text(list_workspace_files())
+
+async def cmd_oku(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update): return
+    if not check_rate_limit(str(update.effective_user.id)):
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
+        return
+
+    filename = " ".join(context.args).strip()
+    if not filename:
+        await update.message.reply_text("❌ Kullanım: /oku <dosya>")
+        return
+
+    content, error = read_file(filename)
+    if error:
+        await update.message.reply_text(error)
+        return
+    for i in range(0, len(content), 3900):
+        await update.message.reply_text(content[i:i+3900])
+
+async def cmd_yaz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update): return
+    if not check_rate_limit(str(update.effective_user.id)):
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
+        return
+
+    parsed = split_filename_and_content(" ".join(context.args))
+    if not parsed:
+        await update.message.reply_text("❌ Kullanım: /yaz <dosya> | <icerik>")
+        return
+
+    filename, content = parsed
+    preview, keyboard = set_pending(
+        context,
+        "save",
+        f"'{filename}' dosyasına yazılsın mı?\n\n{content[:700]}",
+        filename=filename,
+        content=content,
+    )
+    await update.message.reply_text(preview, reply_markup=keyboard)
+
+async def cmd_ekle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update): return
+    if not check_rate_limit(str(update.effective_user.id)):
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
+        return
+
+    parsed = split_filename_and_content(" ".join(context.args))
+    if not parsed:
+        await update.message.reply_text("❌ Kullanım: /ekle <dosya> | <icerik>")
+        return
+
+    filename, content = parsed
+    preview, keyboard = set_pending(
+        context,
+        "append",
+        f"'{filename}' dosyasına tarihli ek yapılsın mı?\n\n{content[:700]}",
+        filename=filename,
+        content=content,
+    )
+    await update.message.reply_text(preview, reply_markup=keyboard)
+
+async def cmd_sil(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update): return
+    if not check_rate_limit(str(update.effective_user.id)):
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
+        return
+
+    filename = " ".join(context.args).strip()
+    if not filename:
+        await update.message.reply_text("❌ Kullanım: /sil <dosya>")
+        return
+
+    preview, keyboard = set_pending(
+        context,
+        "delete",
+        f"'{filename}' dosyası silinsin mi? Bu işlem geri alınamaz.",
+        filename=filename,
+    )
+    await update.message.reply_text(preview, reply_markup=keyboard)
+
+async def cmd_fikir(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update): return
+    if not check_rate_limit(str(update.effective_user.id)):
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
+        return
+
+    fikir = " ".join(context.args).strip()
+    if not fikir:
+        await update.message.reply_text("❌ Kullanım: /fikir <araştırılacak fikir>")
+        return
+
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    prompt = (
+        "Aşağıdaki fikri araştırılabilir bir çalışma notuna dönüştür. "
+        "Gerekirse web_radar aracını kullan. Türkçe yaz. "
+        "Çıktı şu bölümleri içersin: Kısa özet, neden değerli, araştırma notları, "
+        "YouTube/uygulama açısından olası kullanım, ilk 3 aksiyon.\n\n"
+        f"Fikir: {fikir}"
+    )
+    sonuc = run_model_with_tools(MODELS["teknik"], prompt, build_system_prompt(MODELS["teknik"]))
+    preview, keyboard = set_pending(
+        context,
+        "append",
+        f"Not dosyana eklensin mi? ({NOTES_FILE})\n\n{sonuc[:1200]}",
+        filename=NOTES_FILE,
+        content=sonuc,
+    )
+    await update.message.reply_text(preview, reply_markup=keyboard)
+
+async def cmd_tarzim(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update): return
+    if not check_rate_limit(str(update.effective_user.id)):
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
+        return
+
+    tarz = " ".join(context.args).strip()
+    if not tarz:
+        await update.message.reply_text("❌ Kullanım: /tarzim <kanal tarzı, hedef kitle, ton, örnekler>")
+        return
+
+    preview, keyboard = set_pending(
+        context,
+        "save",
+        f"Kanal tarzı '{CHANNEL_STYLE_FILE}' dosyasına kaydedilsin mi?\n\n{tarz[:900]}",
+        filename=CHANNEL_STYLE_FILE,
+        content=tarz,
+    )
+    await update.message.reply_text(preview, reply_markup=keyboard)
+
+async def cmd_senaryo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update): return
+    if not check_rate_limit(str(update.effective_user.id)):
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
+        return
+
+    konu = " ".join(context.args).strip()
+    if not konu:
+        await update.message.reply_text("❌ Kullanım: /senaryo <video konusu>")
+        return
+
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    kanal_tarzi, _ = read_file(CHANNEL_STYLE_FILE)
+    if not kanal_tarzi:
+        kanal_tarzi = "Kanal tarzı dosyası yok. Genel, net, güçlü ve anlaşılır bir YouTube dili kullan."
+
+    prompt = (
+        "Aşağıdaki kanal tarzına göre YouTube videosu paketi hazırla. "
+        "Çıktı şu bölümleri içersin: 10 başlık önerisi, en iyi 3 başlığın gerekçesi, "
+        "video açıklaması, 15 etiket, kapak görseli fikri, thumbnail üzerindeki kısa metinler, "
+        "hook, bölüm bölüm senaryo, kapanış CTA.\n\n"
+        f"Kanal tarzı:\n{kanal_tarzi[:6000]}\n\n"
+        f"Video konusu:\n{konu}"
+    )
+    sonuc = run_model_with_tools(MODELS["strateji"], prompt, build_system_prompt(MODELS["strateji"]))
+    out_name = f"youtube/senaryo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+    preview, keyboard = set_pending(
+        context,
+        "save",
+        f"Senaryo hazır. '{out_name}' olarak kaydedilsin mi?\n\n{sonuc[:1200]}",
+        filename=out_name,
+        content=sonuc,
+    )
+    await update.message.reply_text(preview, reply_markup=keyboard)
+
+async def cmd_kod(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update): return
+    if not check_rate_limit(str(update.effective_user.id)):
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
+        return
+
+    soru = " ".join(context.args).strip()
+    if not soru:
+        await update.message.reply_text("❌ Kullanım: /kod <kod sorusu veya yapmak istediğin değişiklik>")
+        return
+
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    code_context = build_code_context()
+    prompt = (
+        "Aşağıdaki proje dosyalarını ve güvenlik guardrail'lerini okuyarak kod yardımı ver. "
+        "Cevabını mevcut kodun gerçekten yaptığı şeylere göre kur. "
+        "Önce varsa güvenlik riski veya yanlış varsayımı söyle, sonra uygulanabilir önerileri ver. "
+        "Dosyaları değiştirme; sadece öneri, küçük patch taslağı veya güvenli komut öner. "
+        "Zaten yapılmış güvenlikleri tekrar önerme. Emin olmadığın konuyu 'kontrol edilmeli' diye işaretle. "
+        "Her öneride 'Kanıt:' satırıyla ilgili mevcut kod davranışını göster; kanıt bulamıyorsan o öneriyi çıkar. "
+        "Özellikle şu yanlış pozitiflerden kaçın: .env okunmadığı halde token kodda var demek; plain Telegram text'i XSS saymak; "
+        "resolve()+is_relative_to() varken '..' traversal açığı demek; not içeriğini sanitize ederek kullanıcı notlarını bozmayı önermek. "
+        "Eğer cevap için izinli bağlamda olmayan başka dosya gerekiyorsa kullanıcıdan açıkça dosya adını istemesini söyle.\n\n"
+        f"{CODE_REVIEW_GUARDRAILS}\n\n"
+        f"{list_workspace_files()}\n\n"
+        f"Proje dosya bağlamı:\n{code_context}\n\n"
+        f"Soru:\n{soru}"
+    )
+    sonuc = run_model_with_tools(
+        MODELS["kod"],
+        prompt,
+        build_code_system_prompt(MODELS["kod"]),
+        options={"temperature": 0.1, "top_p": 0.4},
+    )
+    for i in range(0, len(sonuc), 3900):
+        await update.message.reply_text(sonuc[i:i+3900])
+
+async def cmd_guvenlik(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update): return
+    if not check_rate_limit(str(update.effective_user.id)):
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
+        return
+
+    report = build_security_report()
+    for i in range(0, len(report), 3900):
+        await update.message.reply_text(report[i:i+3900])
 
 async def cmd_rapor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update): return
@@ -398,11 +921,11 @@ async def cmd_rapor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-        response = ollama_client.chat(
-            model=MODELS["strateji"],
-            messages=[{"role": "user", "content": f"Detayli rapor yaz: {konu}"}]
+        sonuc = run_model_with_tools(
+            MODELS["strateji"],
+            f"Detayli rapor yaz: {konu}",
+            build_system_prompt(MODELS["strateji"]),
         )
-        sonuc = response["message"]["content"]
         out_name = f"rapor_{datetime.now().strftime('%H%M')}.md"
         context.user_data["pending_save"] = {"filename": out_name, "content": sonuc}
         keyboard = InlineKeyboardMarkup([[
@@ -424,15 +947,36 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     logger.info(f"🔘 Callback: {query.data} - {update.effective_user.id}")
     
-    if query.data == "save_pending:iptal":
+    if query.data in {"save_pending:iptal", "pending:no"}:
+        context.user_data.pop("pending_action", None)
+        context.user_data.pop("pending_save", None)
         await query.edit_message_text("❌ İptal edildi.")
     elif query.data == "save_pending:evet":
         pending = context.user_data.get("pending_save")
         if pending:
             result = save_file(pending["filename"], pending["content"])
+            context.user_data.pop("pending_save", None)
             await query.edit_message_text(result)
         else:
             await query.edit_message_text("❌ Kaydetme verisi bulunamadı.")
+    elif query.data == "pending:yes":
+        pending = context.user_data.get("pending_action")
+        if not pending:
+            await query.edit_message_text("❌ Onay bekleyen işlem bulunamadı.")
+            return
+
+        action = pending.get("action")
+        if action == "save":
+            result = save_file(pending["filename"], pending["content"])
+        elif action == "append":
+            result = append_file(pending["filename"], pending["content"])
+        elif action == "delete":
+            result = delete_file(pending["filename"])
+        else:
+            result = "Hata: Bilinmeyen işlem."
+
+        context.user_data.pop("pending_action", None)
+        await query.edit_message_text(result)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 5. AJAN AKIŞI (AGENTIC WORKFLOW + TOOL CALLING)
@@ -500,6 +1044,16 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except requests.RequestException as e:
         logger.error(f"🌐 Ollama iletişim hatası: {e}")
         await update.message.reply_text("❌ Model servisi ulaşılamıyor.")
+    except ResponseError as e:
+        if getattr(e, "status_code", None) == 404:
+            await update.message.reply_text(
+                f"❌ Model bulunamadı: {model}\n\n"
+                f"Önce şu komutla indir:\n"
+                f"docker compose exec ollama ollama pull {model}"
+            )
+        else:
+            logger.error(f"❌ Ollama model hatası: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Model hatası: {getattr(e, 'error', str(e))}")
     except Exception as e:
         logger.error(f"❌ Mesaj işleme kritik hatası: {e}", exc_info=True)
         await update.message.reply_text("❌ İçsel hata oluştu. Sistem yöneticisine başvurunuz.")
@@ -515,7 +1069,17 @@ if __name__ == "__main__":
         
         app = Application.builder().token(TOKEN).build()
         app.add_handler(CommandHandler("start", cmd_start))
+        app.add_handler(CommandHandler("yardim", cmd_yardim))
         app.add_handler(CommandHandler("liste", cmd_liste))
+        app.add_handler(CommandHandler("oku", cmd_oku))
+        app.add_handler(CommandHandler("yaz", cmd_yaz))
+        app.add_handler(CommandHandler("ekle", cmd_ekle))
+        app.add_handler(CommandHandler("sil", cmd_sil))
+        app.add_handler(CommandHandler("fikir", cmd_fikir))
+        app.add_handler(CommandHandler("tarzim", cmd_tarzim))
+        app.add_handler(CommandHandler("senaryo", cmd_senaryo))
+        app.add_handler(CommandHandler("kod", cmd_kod))
+        app.add_handler(CommandHandler("guvenlik", cmd_guvenlik))
         app.add_handler(CommandHandler("rapor", cmd_rapor))
         app.add_handler(CallbackQueryHandler(callback_handler))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))

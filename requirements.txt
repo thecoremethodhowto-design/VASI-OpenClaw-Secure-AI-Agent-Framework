@@ -1,5 +1,5 @@
-python-telegram-bot==20.8
-ollama==0.1.6
+python-telegram-bot==22.5
+ollama==0.6.2
 python-dotenv==1.0.1
 requests==2.32.4
 beautifulsoup4==4.12.3
