@@ -13,6 +13,8 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from ollama import Client, ResponseError
 from dotenv import load_dotenv
+from google import genai
+from google.genai import types
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, MessageHandler, CommandHandler,
@@ -27,6 +29,11 @@ MY_TELEGRAM_ID = os.getenv("MY_TELEGRAM_ID")
 WORKSPACE = Path(os.getenv("WORKSPACE_DIR", "/app/workspace")).resolve()
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://host.docker.internal:11434")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")  # Optional güvenlik
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+WEB_RADAR_ALLOWLIST_RAW = os.getenv("WEB_RADAR_ALLOWLIST", "")
+PENDING_ACTION_TTL_SECONDS = int(os.getenv("PENDING_ACTION_TTL_SECONDS", "600"))
+GEMINI_DAILY_LIMIT_REQUESTS = int(os.getenv("GEMINI_DAILY_LIMIT_REQUESTS", "60"))
 LOG_FILE = Path(os.getenv("VASI_LOG_FILE", "/tmp/vasi_audit.log"))
 NOTES_FILE = os.getenv("VASI_NOTES_FILE", "NOTES.md")
 CHANNEL_STYLE_FILE = os.getenv("VASI_CHANNEL_STYLE_FILE", "channel_style.md")
@@ -54,6 +61,7 @@ if not OLLAMA_API_KEY and ollama_hostname not in LOCAL_OLLAMA_HOSTS:
     raise ValueError("❌ Uzak Ollama sunucusu için OLLAMA_API_KEY zorunludur!")
 
 ollama_client = Client(host=OLLAMA_HOST, headers=ollama_headers if ollama_headers else None)
+gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 # ── LOGGING SETUP ────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -79,10 +87,18 @@ MAX_WEB_TIMEOUT = 10  # saniye
 MAX_WEB_BYTES = 2 * 1024 * 1024  # 2MB
 RATE_LIMIT_WINDOW = 60  # saniye
 RATE_LIMIT_REQUESTS = 20  # İstek sayısı
+GEMINI_RATE_LIMIT_REQUESTS = 5  # İstek sayısı
 ALLOWED_WRITE_EXTENSIONS = {".md", ".txt", ".json", ".yaml", ".yml", ".csv"}
+WEB_RADAR_ALLOWLIST = tuple(
+    domain.strip().lower()
+    for domain in WEB_RADAR_ALLOWLIST_RAW.split(",")
+    if domain.strip()
+)
 
 # ── RATE LIMITING ───────────────────────────────────────────────────────────
 USER_RATE_LIMITS = {}
+GEMINI_RATE_LIMITS = {}
+GEMINI_DAILY_COUNTERS = {}
 
 # ── MODEL KADROSU ──────────────────────────────────────────────────────────────
 MODELS = {
@@ -118,7 +134,7 @@ CODE_REVIEW_GUARDRAILS = """Bilinen guvenlik gercekleri:
 - Komut girdisini alfanumerik karakterlere indirgemek dosya yollari, Turkce metin, JSON/YAML ve not kullanimini bozar.
 
 Bulgu kurali:
-- Sadece somut guvenlik acigi veya anlamli risk varsa oner.
+- Sadece somut guvenlik acigi veya anlamli risk varsa onler.
 - Hardening/fazladan temizlik onerilerini 'acik' gibi sunma.
 - Her bulgu icin mevcut koddan net kanit ver.
 - Kanit guardrail ile celisiyorsa bulguyu cikarma.
@@ -142,9 +158,14 @@ Komutlar:
 /ekle <dosya> | <icerik> - Onayla dosyaya tarihli ek yapar
 /sil <dosya> - Onayla dosyayı siler
 /fikir <fikir> - Fikri araştırır, onayla not dosyana ekler
+/ara <konu> - Gemini + Google Search ile kaynaklı internet araştırması yapar
+/ara_not <konu> - Gemini araştırmasını onayla not dosyana ekler
+/ara_ozet <konu> - Kısa, kaynaklı Gemini özeti üretir
+/ara_senaryo <konu> - Gemini araştırması + kanal tarzıyla video paketi üretir
 /tarzim <kanal tarzi> - YouTube kanal tarzını kaydeder
 /senaryo <konu> - Kanal tarzına göre senaryo, başlık, açıklama ve kapak önerir
 /kod <soru> - Workspace bağlamıyla kod yardımı verir
+/kod_patch <istek> - Uygulanabilir patch taslağı üretir (dosya yazmaz)
 /guvenlik - Mevcut güvenlik kontrollerini deterministik raporlar
 /rapor <konu> - Rapor taslağı üretir, onayla kaydeder
 """
@@ -173,6 +194,41 @@ def check_rate_limit(user_id: str) -> bool:
     USER_RATE_LIMITS[user_id].append(now)
     return True
 
+def check_gemini_rate_limit(user_id: str) -> bool:
+    """Gemini arastirmalari icin daha dar maliyet/istismar limiti."""
+    now = datetime.now()
+    if user_id not in GEMINI_RATE_LIMITS:
+        GEMINI_RATE_LIMITS[user_id] = []
+
+    GEMINI_RATE_LIMITS[user_id] = [
+        t for t in GEMINI_RATE_LIMITS[user_id]
+        if (now - t).total_seconds() < RATE_LIMIT_WINDOW
+    ]
+
+    if len(GEMINI_RATE_LIMITS[user_id]) >= GEMINI_RATE_LIMIT_REQUESTS:
+        logger.warning(f"⚠️ Gemini rate limit aşımı: {user_id}")
+        return False
+
+    GEMINI_RATE_LIMITS[user_id].append(now)
+    return True
+
+def check_gemini_daily_limit(user_id: str) -> bool:
+    today = datetime.now().strftime("%Y-%m-%d")
+    if user_id not in GEMINI_DAILY_COUNTERS:
+        GEMINI_DAILY_COUNTERS[user_id] = {"date": today, "count": 0}
+
+    record = GEMINI_DAILY_COUNTERS[user_id]
+    if record["date"] != today:
+        record["date"] = today
+        record["count"] = 0
+
+    if record["count"] >= GEMINI_DAILY_LIMIT_REQUESTS:
+        logger.warning(f"⚠️ Gemini günlük limit aşıldı: {user_id}")
+        return False
+
+    record["count"] += 1
+    return True
+
 def is_authorized(update: Update) -> bool:
     user_id = str(update.effective_user.id)
     if MY_TELEGRAM_ID and user_id != MY_TELEGRAM_ID:
@@ -190,6 +246,13 @@ def is_authorized(update: Update) -> bool:
             logger.warning(f"🚫 Eski mesaj reddedildi (yaş: {age}s): {user_id}")
             return False
     return True
+
+def sanitize_for_log(text: str, max_len: int = 240) -> str:
+    cleaned = " ".join(text.replace("\n", " ").split())
+    return cleaned[:max_len]
+
+def audit_event(event: str, user_id: str, detail: str) -> None:
+    logger.info(f"AUDIT | {event} | user={user_id} | {sanitize_for_log(detail)}")
 
 def safe_path(filename: str) -> Path | None:
     """Path traversal saldırılarına karşı korunan güvenli path çözümü."""
@@ -293,6 +356,16 @@ def is_safe_url(url: str) -> bool:
         if not hostname:
             return False
 
+        host_lc = hostname.lower()
+        if WEB_RADAR_ALLOWLIST:
+            allowlisted = any(
+                host_lc == domain or host_lc.endswith(f".{domain}")
+                for domain in WEB_RADAR_ALLOWLIST
+            )
+            if not allowlisted:
+                logger.warning(f"🚫 Allowlist dışı host engellendi: {host_lc}")
+                return False
+
         if parsed.username or parsed.password:
             logger.warning("🚫 URL kullanıcı bilgisi içeriyor")
             return False
@@ -374,6 +447,93 @@ def skill_web_radar(url: str) -> str:
     except Exception as e:
         logger.error(f"❌ Web radar kritik hata: {e}", exc_info=True)
         return "Radar Hatasi: İçsel hata."
+
+def extract_gemini_sources(response) -> list[str]:
+    """Gemini grounding metadata icinden okunabilir kaynak listesini cikarir."""
+    sources = []
+    try:
+        candidates = getattr(response, "candidates", []) or []
+        if not candidates:
+            return sources
+        metadata = getattr(candidates[0], "grounding_metadata", None)
+        chunks = getattr(metadata, "grounding_chunks", []) if metadata else []
+        for chunk in chunks:
+            web = getattr(chunk, "web", None)
+            if not web:
+                continue
+            title = getattr(web, "title", "") or "Kaynak"
+            uri = getattr(web, "uri", "") or ""
+            if uri:
+                sources.append(f"- {title}: {uri}")
+    except Exception as e:
+        logger.warning(f"Gemini kaynakları okunamadı: {e}")
+    return sources[:8]
+
+def gemini_grounded_research(topic: str) -> str:
+    """Gemini + Google Search grounding ile kaynakli arastirma yapar."""
+    if not GEMINI_API_KEY or gemini_client is None:
+        return "Hata: GEMINI_API_KEY ayarlanmamış. .env dosyasına ekleyip container'ı yeniden başlatın."
+
+    if not topic or len(topic) > 2000:
+        return "Hata: Araştırma konusu boş veya çok uzun."
+
+    prompt = (
+        "Türkçe yanıt ver. Güncel web araştırması yap ve iddiaları kaynaklandır. "
+        "Çıktı şu bölümleri içersin: Kısa cevap, bulgular, kaynaklara dayalı notlar, "
+        "riskler/emin olunmayan noktalar, uygulanabilir ilk 3 adım. "
+        "Workspace, dosya içeriği, token veya özel veri isteme.\n\n"
+        f"Araştırma konusu: {topic}"
+    )
+
+    try:
+        grounding_tool = types.Tool(google_search=types.GoogleSearch())
+        config = types.GenerateContentConfig(
+            tools=[grounding_tool],
+            temperature=0.2,
+        )
+        response = gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=config,
+        )
+        text = getattr(response, "text", "") or "Gemini yanıt metni üretemedi."
+        sources = extract_gemini_sources(response)
+        if sources:
+            text = f"{text}\n\nKaynaklar:\n" + "\n".join(sources)
+        return text[:12000]
+    except Exception as e:
+        logger.error(f"❌ Gemini araştırma hatası: {e}", exc_info=True)
+        return "Hata: Gemini araştırması tamamlanamadı."
+
+def gemini_grounded_summary(topic: str) -> str:
+    """Gemini ile kisa ve kaynakli arastirma ozeti."""
+    if not GEMINI_API_KEY or gemini_client is None:
+        return "Hata: GEMINI_API_KEY ayarlanmamış. .env dosyasına ekleyip container'ı yeniden başlatın."
+    if not topic or len(topic) > 2000:
+        return "Hata: Araştırma konusu boş veya çok uzun."
+
+    prompt = (
+        "Türkçe yanıt ver. Güncel web araştırması yap. "
+        "Çıktı en fazla 8 madde olsun: 1 paragraf özet + 5 kritik bulgu + 2 risk notu. "
+        "Kısa, net, uygulanabilir yaz.\n\n"
+        f"Konu: {topic}"
+    )
+    try:
+        grounding_tool = types.Tool(google_search=types.GoogleSearch())
+        config = types.GenerateContentConfig(tools=[grounding_tool], temperature=0.1)
+        response = gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=config,
+        )
+        text = getattr(response, "text", "") or "Gemini kısa özet üretemedi."
+        sources = extract_gemini_sources(response)
+        if sources:
+            text = f"{text}\n\nKaynaklar:\n" + "\n".join(sources)
+        return text[:9000]
+    except Exception as e:
+        logger.error(f"❌ Gemini kısa özet hatası: {e}", exc_info=True)
+        return "Hata: Gemini kısa özet üretilemedi."
 
 def run_model_with_tools(
     model: str,
@@ -599,12 +759,27 @@ def split_filename_and_content(text: str) -> tuple[str, str] | None:
     return filename, content
 
 def set_pending(context: ContextTypes.DEFAULT_TYPE, action: str, preview: str, **payload):
-    context.user_data["pending_action"] = {"action": action, **payload}
+    context.user_data["pending_action"] = {
+        "action": action,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        **payload,
+    }
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("Onayla", callback_data="pending:yes"),
         InlineKeyboardButton("İptal", callback_data="pending:no")
     ]])
     return preview, keyboard
+
+def is_pending_expired(pending: dict) -> bool:
+    created_at = pending.get("created_at")
+    if not created_at:
+        return True
+    try:
+        created_dt = datetime.fromisoformat(created_at)
+    except ValueError:
+        return True
+    age = (datetime.now(timezone.utc) - created_dt).total_seconds()
+    return age > PENDING_ACTION_TTL_SECONDS
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 4. YÖNLENDİRME (ROUTING) VE BOT KOMUTLARI
@@ -648,6 +823,7 @@ def build_security_report() -> str:
     ollama_host = urlparse(OLLAMA_HOST).hostname or ""
     ollama_scope = "yerel/izinli" if ollama_host in LOCAL_OLLAMA_HOSTS else "uzak"
     api_key_state = "var" if bool(OLLAMA_API_KEY) else "yok"
+    allowlist_state = ", ".join(WEB_RADAR_ALLOWLIST) if WEB_RADAR_ALLOWLIST else "kapalı (public hostlara açık)"
 
     return f"""# Vasi Güvenlik Durumu
 
@@ -659,18 +835,25 @@ def build_security_report() -> str:
 - Yazma/silme sınırı: Sadece {", ".join(sorted(ALLOWED_WRITE_EXTENSIONS))} uzantıları desteklenir.
 - Silme sınırı: Klasörler ve gizli dosyalar silinmez.
 - Yazma onayı: `/yaz`, `/ekle`, `/sil`, `/fikir`, `/senaryo`, `/rapor` işlemleri Telegram onay butonu ister.
+- Pending TTL: Onay bekleyen işlemler {PENDING_ACTION_TTL_SECONDS // 60} dakika sonra otomatik geçersiz olur.
 - SSRF koruması: Web aracı sadece `http/https`, public hostname/IP, redirect kapalı ve {MAX_WEB_BYTES // 1024 // 1024}MB yanıt limitiyle çalışır.
+- Web radar allowlist: {allowlist_state}
+- Gemini araştırması: Sadece `/ara`, `/ara_not`, `/ara_ozet` ve `/ara_senaryo` komutlarında çalışır; workspace dosyaları Gemini'ye otomatik gönderilmez.
+- Gemini rate limit: Kullanıcı başına {RATE_LIMIT_WINDOW} saniyede {GEMINI_RATE_LIMIT_REQUESTS} araştırma sınırı var.
+- Gemini günlük limit: Kullanıcı başına günlük {GEMINI_DAILY_LIMIT_REQUESTS} araştırma.
 - Tool whitelist: Model sadece {", ".join(sorted(ALLOWED_TOOL_NAMES))} araçlarını çağırabilir.
 - Docker hardening: `read_only`, `tmpfs /tmp`, `no-new-privileges`, `cap_drop: ALL` compose dosyasında tanımlı.
 - Sır koruması: `.env` git/docker ignore içinde; loglarda `httpx` Telegram URL logları susturuldu.
+- Audit izi: Hassas içerik maskeleyen `AUDIT` satırları tutulur.
 - Ollama host: `{OLLAMA_HOST}` ({ollama_scope}); API key durumu: {api_key_state}. Uzak host key olmadan başlatılmaz.
+- Gemini API key durumu: {"var" if bool(GEMINI_API_KEY) else "yok"}; model: `{GEMINI_MODEL}`.
 
 ## Gerçekçi Sıradaki İyileştirmeler
 1. Otomatik test ekle: `safe_path`, `is_safe_url`, yazma uzantısı, onay akışı için küçük unit testler.
 2. Log rotasyonu ekle: Uzun süreli kullanımda `/tmp/vasi_audit.log` veya host logları büyümesin.
-3. Pending işlem süresi ekle: Onay bekleyen işlem 5-10 dakika sonra otomatik iptal olsun.
-4. Web radar allowlist opsiyonu ekle: İstersen sadece belirli domainlerde araştırma yapabilsin.
-5. Komut denetim izi ekle: Hangi komutun ne zaman çalıştığını içerik sızdırmadan kısa audit kaydı olarak tut.
+3. Birim testleri artır: `pending TTL`, `daily Gemini limit` ve allowlist akışlarını kapsa.
+4. Oran/limit ayarlarını `.env` üzerinden tamamen yönetilebilir yap.
+5. Audit satırlarını ayrı dosya veya merkezi log sistemine yönlendir.
 
 ## Not
 Bu rapor model tarafından tahmin edilmez; mevcut kod sabitlerinden ve güvenlik ayarlarından üretilir.
@@ -785,6 +968,7 @@ async def cmd_fikir(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not fikir:
         await update.message.reply_text("❌ Kullanım: /fikir <araştırılacak fikir>")
         return
+    audit_event("fikir_request", str(update.effective_user.id), fikir[:120])
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     prompt = (
@@ -800,6 +984,115 @@ async def cmd_fikir(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "append",
         f"Not dosyana eklensin mi? ({NOTES_FILE})\n\n{sonuc[:1200]}",
         filename=NOTES_FILE,
+        content=sonuc,
+    )
+    await update.message.reply_text(preview, reply_markup=keyboard)
+
+async def cmd_ara(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update): return
+    user_id = str(update.effective_user.id)
+    if not check_rate_limit(user_id) or not check_gemini_rate_limit(user_id):
+        await update.message.reply_text("⚠️ Çok hızlı Gemini araştırması istediniz. Lütfen bekleyiniz.")
+        return
+    if not check_gemini_daily_limit(user_id):
+        await update.message.reply_text("⚠️ Günlük Gemini araştırma limitine ulaştınız. Yarın tekrar deneyin.")
+        return
+
+    konu = " ".join(context.args).strip()
+    if not konu:
+        await update.message.reply_text("❌ Kullanım: /ara <araştırma konusu>")
+        return
+    audit_event("gemini_research", user_id, konu[:120])
+
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    sonuc = gemini_grounded_research(konu)
+    for i in range(0, len(sonuc), 3900):
+        await update.message.reply_text(sonuc[i:i+3900])
+
+async def cmd_ara_not(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update): return
+    user_id = str(update.effective_user.id)
+    if not check_rate_limit(user_id) or not check_gemini_rate_limit(user_id):
+        await update.message.reply_text("⚠️ Çok hızlı Gemini araştırması istediniz. Lütfen bekleyiniz.")
+        return
+    if not check_gemini_daily_limit(user_id):
+        await update.message.reply_text("⚠️ Günlük Gemini araştırma limitine ulaştınız. Yarın tekrar deneyin.")
+        return
+
+    konu = " ".join(context.args).strip()
+    if not konu:
+        await update.message.reply_text("❌ Kullanım: /ara_not <araştırma konusu>")
+        return
+    audit_event("gemini_research_note", user_id, konu[:120])
+
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    sonuc = gemini_grounded_research(konu)
+    preview, keyboard = set_pending(
+        context,
+        "append",
+        f"Gemini araştırması not dosyana eklensin mi? ({NOTES_FILE})\n\n{sonuc[:1200]}",
+        filename=NOTES_FILE,
+        content=sonuc,
+    )
+    await update.message.reply_text(preview, reply_markup=keyboard)
+
+async def cmd_ara_ozet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update): return
+    user_id = str(update.effective_user.id)
+    if not check_rate_limit(user_id) or not check_gemini_rate_limit(user_id):
+        await update.message.reply_text("⚠️ Çok hızlı Gemini araştırması istediniz. Lütfen bekleyiniz.")
+        return
+    if not check_gemini_daily_limit(user_id):
+        await update.message.reply_text("⚠️ Günlük Gemini araştırma limitine ulaştınız. Yarın tekrar deneyin.")
+        return
+
+    konu = " ".join(context.args).strip()
+    if not konu:
+        await update.message.reply_text("❌ Kullanım: /ara_ozet <araştırma konusu>")
+        return
+    audit_event("gemini_summary", user_id, konu[:120])
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    sonuc = gemini_grounded_summary(konu)
+    for i in range(0, len(sonuc), 3900):
+        await update.message.reply_text(sonuc[i:i+3900])
+
+async def cmd_ara_senaryo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update): return
+    user_id = str(update.effective_user.id)
+    if not check_rate_limit(user_id) or not check_gemini_rate_limit(user_id):
+        await update.message.reply_text("⚠️ Çok hızlı Gemini araştırması istediniz. Lütfen bekleyiniz.")
+        return
+    if not check_gemini_daily_limit(user_id):
+        await update.message.reply_text("⚠️ Günlük Gemini araştırma limitine ulaştınız. Yarın tekrar deneyin.")
+        return
+
+    konu = " ".join(context.args).strip()
+    if not konu:
+        await update.message.reply_text("❌ Kullanım: /ara_senaryo <video konusu>")
+        return
+
+    audit_event("gemini_scenario", user_id, konu[:120])
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    arastirma = gemini_grounded_research(konu)
+    kanal_tarzi, _ = read_file(CHANNEL_STYLE_FILE)
+    if not kanal_tarzi:
+        kanal_tarzi = "Kanal tarzı dosyası yok. Genel, net ve öğretici bir YouTube dili kullan."
+
+    prompt = (
+        "Aşağıdaki araştırma notları ve kanal tarzına göre YouTube videosu üretim paketi hazırla. "
+        "Çıktı bölümleri: 10 başlık, en iyi 3 seçim ve gerekçe, video açıklaması, 15 etiket, "
+        "thumbnail fikri, hook, bölüm bölüm senaryo, kapanış CTA.\n\n"
+        f"Kanal tarzı:\n{kanal_tarzi[:5000]}\n\n"
+        f"Araştırma notları:\n{arastirma[:9000]}\n\n"
+        f"Konu:\n{konu}"
+    )
+    sonuc = run_model_with_tools(MODELS["strateji"], prompt, build_system_prompt(MODELS["strateji"]))
+    out_name = f"youtube/ara_senaryo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+    preview, keyboard = set_pending(
+        context,
+        "save",
+        f"Araştırmalı senaryo hazır. '{out_name}' olarak kaydedilsin mi?\n\n{sonuc[:1200]}",
+        filename=out_name,
         content=sonuc,
     )
     await update.message.reply_text(preview, reply_markup=keyboard)
@@ -896,6 +1189,34 @@ async def cmd_kod(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i in range(0, len(sonuc), 3900):
         await update.message.reply_text(sonuc[i:i+3900])
 
+async def cmd_kod_patch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update): return
+    if not check_rate_limit(str(update.effective_user.id)):
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
+        return
+    istek = " ".join(context.args).strip()
+    if not istek:
+        await update.message.reply_text("❌ Kullanım: /kod_patch <yapmak istediğin değişiklik>")
+        return
+
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    code_context = build_code_context()
+    prompt = (
+        "Sadece patch taslağı üret. Dosya yazma yok. "
+        "Çıktı formatı: 1) Risk değerlendirmesi 2) Değişiklik planı 3) Örnek diff taslağı. "
+        "Mevcut dosya bağlamına sadık kal.\n\n"
+        f"Bağlam:\n{code_context}\n\n"
+        f"İstek:\n{istek}"
+    )
+    sonuc = run_model_with_tools(
+        MODELS["kod"],
+        prompt,
+        build_code_system_prompt(MODELS["kod"]),
+        options={"temperature": 0.1, "top_p": 0.4},
+    )
+    for i in range(0, len(sonuc), 3900):
+        await update.message.reply_text(sonuc[i:i+3900])
+
 async def cmd_guvenlik(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update): return
     if not check_rate_limit(str(update.effective_user.id)):
@@ -927,7 +1248,11 @@ async def cmd_rapor(update: Update, context: ContextTypes.DEFAULT_TYPE):
             build_system_prompt(MODELS["strateji"]),
         )
         out_name = f"rapor_{datetime.now().strftime('%H%M')}.md"
-        context.user_data["pending_save"] = {"filename": out_name, "content": sonuc}
+        context.user_data["pending_save"] = {
+            "filename": out_name,
+            "content": sonuc,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("Kaydet", callback_data="save_pending:evet"),
             InlineKeyboardButton("İptal", callback_data="save_pending:iptal")
@@ -946,16 +1271,24 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     logger.info(f"🔘 Callback: {query.data} - {update.effective_user.id}")
+    user_id = str(update.effective_user.id)
     
     if query.data in {"save_pending:iptal", "pending:no"}:
+        audit_event("pending_cancel", user_id, query.data)
         context.user_data.pop("pending_action", None)
         context.user_data.pop("pending_save", None)
         await query.edit_message_text("❌ İptal edildi.")
     elif query.data == "save_pending:evet":
         pending = context.user_data.get("pending_save")
         if pending:
+            if is_pending_expired(pending):
+                context.user_data.pop("pending_save", None)
+                audit_event("pending_expired", user_id, "save_pending")
+                await query.edit_message_text("⏱️ Onay süresi doldu. İşlem iptal edildi.")
+                return
             result = save_file(pending["filename"], pending["content"])
             context.user_data.pop("pending_save", None)
+            audit_event("pending_save_apply", user_id, pending["filename"])
             await query.edit_message_text(result)
         else:
             await query.edit_message_text("❌ Kaydetme verisi bulunamadı.")
@@ -963,6 +1296,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pending = context.user_data.get("pending_action")
         if not pending:
             await query.edit_message_text("❌ Onay bekleyen işlem bulunamadı.")
+            return
+        if is_pending_expired(pending):
+            context.user_data.pop("pending_action", None)
+            audit_event("pending_expired", user_id, pending.get("action", "unknown"))
+            await query.edit_message_text("⏱️ Onay süresi doldu. İşlem iptal edildi.")
             return
 
         action = pending.get("action")
@@ -976,6 +1314,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result = "Hata: Bilinmeyen işlem."
 
         context.user_data.pop("pending_action", None)
+        audit_event("pending_apply", user_id, f"{action}:{pending.get('filename', '-')}")
         await query.edit_message_text(result)
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1076,9 +1415,14 @@ if __name__ == "__main__":
         app.add_handler(CommandHandler("ekle", cmd_ekle))
         app.add_handler(CommandHandler("sil", cmd_sil))
         app.add_handler(CommandHandler("fikir", cmd_fikir))
+        app.add_handler(CommandHandler("ara", cmd_ara))
+        app.add_handler(CommandHandler("ara_not", cmd_ara_not))
+        app.add_handler(CommandHandler("ara_ozet", cmd_ara_ozet))
+        app.add_handler(CommandHandler("ara_senaryo", cmd_ara_senaryo))
         app.add_handler(CommandHandler("tarzim", cmd_tarzim))
         app.add_handler(CommandHandler("senaryo", cmd_senaryo))
         app.add_handler(CommandHandler("kod", cmd_kod))
+        app.add_handler(CommandHandler("kod_patch", cmd_kod_patch))
         app.add_handler(CommandHandler("guvenlik", cmd_guvenlik))
         app.add_handler(CommandHandler("rapor", cmd_rapor))
         app.add_handler(CallbackQueryHandler(callback_handler))

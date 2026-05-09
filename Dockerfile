@@ -13,6 +13,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Uygulama dosyaları
 COPY vasi.py .
+COPY tests ./tests
+COPY pytest.ini .
 
 # Security: Non-root user oluştur
 RUN useradd -m -u 1000 vasi && chown -R vasi:vasi /app

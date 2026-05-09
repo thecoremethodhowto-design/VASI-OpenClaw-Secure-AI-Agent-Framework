@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 VASI OpenClaw Secure AI Agent Framework
 VASI, Telegram uzerinden kontrol edilen, yerel Ollama modelleriyle calisan ve guvenlik sinirlari onceden tanimlanmis kisisel bir AI ajan iskeletidir. Fikir yakalama, not tutma, YouTube senaryosu uretme, kod yardimi ve istege bagli Gemini + Google Search destekli internet arastirmasi icin tasarlanmistir.
 
@@ -34,6 +35,60 @@ cd /Users/thecoremethodhowto/Desktop/CORE_AGENT
 cp .env.example .env
 chmod 600 .env
 .env icindeki degerleri doldurun:
+=======
+# VASI OpenClaw Secure AI Agent Framework
+
+VASI, Telegram uzerinden kontrol edilen, yerel Ollama modelleriyle calisan ve guvenlik sinirlari onceden tanimlanmis kisisel bir AI ajan iskeletidir. Fikir yakalama, not tutma, YouTube senaryosu uretme, kod yardimi ve istege bagli Gemini + Google Search destekli internet arastirmasi icin tasarlanmistir.
+
+> Not: Bu repo resmi OpenClaw paketini kullanmaz. OpenClaw tarzinda; tool whitelist, workspace sandbox, onayli dosya islemleri ve guvenlik raporu mantigiyla kurulmus bagimsiz bir VASI ajan mimarisidir.
+
+## Ozellikler
+
+- Telegram bot arayuzu
+- Yerel Ollama model baglantisi
+- Workspace icinde dosya okuma, yazma, ekleme ve silme
+- Yazma/silme icin Telegram onay butonu
+- Tarih-saat damgali not ekleme
+- YouTube kanal tarzi kaydetme
+- Baslik, aciklama, kapak fikri ve senaryo uretme
+- Proje dosyalarini dikkate alan kod yardimi
+- Deterministik `/guvenlik` raporu
+- Gemini API ile kaynakli internet arastirmasi
+- Docker hardening: read-only filesystem, tmpfs, no-new-privileges, cap_drop
+
+## Guvenlik Modeli
+
+VASI'nin temel guvenlik prensibi: model onerir, kritik islemler kullanici onayi olmadan yapilmaz.
+
+- Sadece `.env` icindeki `MY_TELEGRAM_ID` sahibi kullanici erisebilir.
+- Grup ve yonlendirilmis mesajlar reddedilir.
+- Dosya islemleri yalnizca `workspace/` icinde calisir.
+- Path traversal `resolve()` + `is_relative_to(WORKSPACE)` ile engellenir.
+- Yazma, ekleme ve silme sadece `.md`, `.txt`, `.json`, `.yaml`, `.yml`, `.csv` dosyalarinda calisir.
+- Silme islemleri klasorleri ve gizli dosyalari kapsamaz.
+- Model sadece izinli araclari kullanabilir.
+- Gemini arastirmasi sadece `/ara` ve `/ara_not` komutlariyla calisir; workspace dosyalari Gemini'ye otomatik gonderilmez.
+- `.env` Git ve Docker build baglamindan dislanir.
+
+## Kurulum
+
+1. Repoyu klonlayin veya klasore girin:
+
+```bash
+cd /Users/thecoremethodhowto/Desktop/CORE_AGENT
+```
+
+2. `.env` dosyasini olusturun:
+
+```bash
+cp .env.example .env
+chmod 600 .env
+```
+
+3. `.env` icindeki degerleri doldurun:
+
+```env
+>>>>>>> df3005d (Add Gemini grounded research and README)
 TELEGRAM_BOT_TOKEN=BotFather_tokeniniz
 MY_TELEGRAM_ID=Telegram_kullanici_id
 WORKSPACE_DIR=/app/workspace
@@ -45,6 +100,7 @@ VASI_MODEL_KOD=qwen3-coder:30b
 VASI_MODEL_GORSEL=qwen3:30b
 GEMINI_API_KEY=Gemini_API_keyiniz
 GEMINI_MODEL=gemini-2.5-flash
+<<<<<<< HEAD
 Gemini zorunlu degildir. GEMINI_API_KEY bos kalirsa /ara ve /ara_not hata mesaji verir, diger ozellikler calismaya devam eder.
 
 Ollama modellerini hazirlayin:
@@ -55,6 +111,34 @@ docker compose up -d --build
 Loglari izleyin:
 docker compose logs -f vasi-core
 Telegram Komutlari
+=======
+```
+
+Gemini zorunlu degildir. `GEMINI_API_KEY` bos kalirsa `/ara` ve `/ara_not` hata mesaji verir, diger ozellikler calismaya devam eder.
+
+4. Ollama modellerini hazirlayin:
+
+```bash
+ollama pull qwen3:30b
+ollama pull qwen3-coder:30b
+```
+
+5. Docker ile baslatin:
+
+```bash
+docker compose up -d --build
+```
+
+6. Loglari izleyin:
+
+```bash
+docker compose logs -f vasi-core
+```
+
+## Telegram Komutlari
+
+```text
+>>>>>>> df3005d (Add Gemini grounded research and README)
 /start
 /yardim
 /liste
@@ -70,13 +154,22 @@ Telegram Komutlari
 /kod Bu projede siradaki teknik iyilestirme ne olmali?
 /guvenlik
 /rapor konu basligi
+<<<<<<< HEAD
 Gemini Arastirmasi
 Gemini entegrasyonu Google GenAI SDK ile calisir. Google'in resmi dokumantasyonunda onerilen google-genai kutuphanesi kullanilir ve API key GEMINI_API_KEY ortam degiskeninden okunur.
+=======
+```
+
+## Gemini Arastirmasi
+
+Gemini entegrasyonu Google GenAI SDK ile calisir. Google'in resmi dokumantasyonunda onerilen `google-genai` kutuphanesi kullanilir ve API key `GEMINI_API_KEY` ortam degiskeninden okunur.
+>>>>>>> df3005d (Add Gemini grounded research and README)
 
 Kaynakli arastirma icin Gemini Grounding with Google Search kullanilir. Bu ozellik modeli guncel web icerigiyle temellendirir ve kaynak metadata'si dondurebilir.
 
 Guvenlik sinirlari:
 
+<<<<<<< HEAD
 Gemini sadece acik /ara ve /ara_not komutlarinda kullanilir.
 Workspace dosyalari Gemini'ye otomatik gonderilmez.
 /ara_not sonucu dogrudan yazmaz; once Telegram onayi ister.
@@ -88,6 +181,23 @@ Gemini API libraries
 Gemini API keys
 Grounding with Google Search
 Proje Yapisi
+=======
+- Gemini sadece acik `/ara` ve `/ara_not` komutlarinda kullanilir.
+- Workspace dosyalari Gemini'ye otomatik gonderilmez.
+- `/ara_not` sonucu dogrudan yazmaz; once Telegram onayi ister.
+- Gemini icin ayrica rate limit vardir.
+- API key loglanmaz ve repo disinda tutulur.
+
+Resmi dokumanlar:
+
+- [Gemini API libraries](https://ai.google.dev/gemini-api/docs/libraries)
+- [Gemini API keys](https://ai.google.dev/gemini-api/docs/api-key)
+- [Grounding with Google Search](https://ai.google.dev/gemini-api/docs/grounding/search-suggestions)
+
+## Proje Yapisi
+
+```text
+>>>>>>> df3005d (Add Gemini grounded research and README)
 .
 ├── vasi.py
 ├── Dockerfile
@@ -99,5 +209,46 @@ Proje Yapisi
 └── workspace/
     ├── NOTES.md
     └── channel_style.md
+<<<<<<< HEAD
 Gelistirme Notlari
 Bu proje kisisel kullanim ve deneysel ajan mimarisi icin hazirlanmistir. Uretim ortaminda kullanmadan once otomatik testler, log rotasyonu, onay sure asimi ve daha ayrintili audit kayitlari eklenmelidir.
+=======
+```
+
+## Gelistirme Notlari
+
+Bu proje kisisel kullanim ve deneysel ajan mimarisi icin hazirlanmistir. Uretim ortaminda kullanmadan once otomatik testler, log rotasyonu, onay sure asimi ve daha ayrintili audit kayitlari eklenmelidir.
+
+## Test Checklist (Video Icin)
+
+Asagidaki sirayi izleyerek hizli bir kabul testi yapabilirsin:
+
+1. `/start` ile komut menusu geliyor mu?
+2. `/guvenlik` ile deterministik rapor donuyor mu?
+3. `/ekle NOTES.md | ttl test` ac, TTL suresini gecip onayla: `⏱️ Onay süresi doldu...` mesaji geliyor mu?
+4. `/ara_ozet <konu>` kaynakli kisa arastirma uretiyor mu?
+5. `/ara_senaryo <konu>` onayli senaryo dosyasi olusturuyor mu?
+6. `/kod_patch <istek>` dosya yazmadan patch taslagi uretiyor mu?
+
+Container ici testler:
+
+```bash
+docker compose run --rm vasi-core pytest
+```
+
+## 3 Komutluk Demo (Durdur / Kaldir / Tekrar Kur)
+
+```bash
+# 1) Durdur
+docker compose stop
+
+# 2) Kaldir (container + network + volume + local image)
+docker compose down --rmi local --volumes --remove-orphans
+
+# 3) Tekrar kur
+docker compose up -d --build
+```
+
+Not: `down --volumes` compose volume verilerini de siler.
+
+>>>>>>> df3005d (Add Gemini grounded research and README)
