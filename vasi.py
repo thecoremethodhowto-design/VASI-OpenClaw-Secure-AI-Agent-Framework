@@ -35,8 +35,9 @@ WEB_RADAR_ALLOWLIST_RAW = os.getenv("WEB_RADAR_ALLOWLIST", "")
 PENDING_ACTION_TTL_SECONDS = int(os.getenv("PENDING_ACTION_TTL_SECONDS", "600"))
 GEMINI_DAILY_LIMIT_REQUESTS = int(os.getenv("GEMINI_DAILY_LIMIT_REQUESTS", "60"))
 LOG_FILE = Path(os.getenv("VASI_LOG_FILE", "/tmp/vasi_audit.log"))
-NOTES_FILE = os.getenv("VASI_NOTES_FILE", "NOTES.md")
-CHANNEL_STYLE_FILE = os.getenv("VASI_CHANNEL_STYLE_FILE", "channel_style.md")
+NOTES_FILE = os.getenv("VASI_NOTES_FILE", "notlar/NOTES.md")
+CHANNEL_STYLE_FILE = os.getenv("VASI_CHANNEL_STYLE_FILE", "skills/youtube_icerik.md")
+CODE_STYLE_FILE = os.getenv("VASI_CODE_STYLE_FILE", "skills/kod_yardimcisi.md")
 
 if not TOKEN:
     raise ValueError("❌ TELEGRAM_BOT_TOKEN env variable zorunludur!")
@@ -94,6 +95,11 @@ WEB_RADAR_ALLOWLIST = tuple(
     for domain in WEB_RADAR_ALLOWLIST_RAW.split(",")
     if domain.strip()
 )
+SANDBOX_SCOPES = {
+    "general": ("notlar",),
+    "youtube": ("youtube", "notlar", "skills/youtube_icerik.md", "skills/arastirma.md"),
+    "code": ("projeler", "skills/kod_yardimcisi.md"),
+}
 
 # ── RATE LIMITING ───────────────────────────────────────────────────────────
 USER_RATE_LIMITS = {}
@@ -265,6 +271,23 @@ def safe_path(filename: str) -> Path | None:
     except Exception as e:
         logger.error(f"Path çözümleme hatası: {e}")
         return None
+
+def is_scope_allowed(path: Path, scope: str) -> bool:
+    allowed = SANDBOX_SCOPES.get(scope, SANDBOX_SCOPES["general"])
+    rel_str = str(path.relative_to(WORKSPACE))
+    for rule in allowed:
+        if rel_str == rule or rel_str.startswith(f"{rule}/"):
+            return True
+    return False
+
+def scoped_path(filename: str, scope: str = "general") -> Path | None:
+    path = safe_path(filename)
+    if path is None:
+        return None
+    if not is_scope_allowed(path, scope):
+        logger.warning(f"🚫 Scope ihlali: scope={scope} path={filename}")
+        return None
+    return path
 
 def is_allowed_write_file(path: Path) -> bool:
     return path.suffix.lower() in ALLOWED_WRITE_EXTENSIONS
@@ -626,18 +649,24 @@ OPENCLAW_TOOLS = [
 # 3. DOSYA İŞLEMLERİ (KAPALI DEVRE)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def list_workspace_files() -> str:
+def list_workspace_files(scope: str = "general") -> str:
     files = list(WORKSPACE.rglob("*"))
     if not files: return "Workspace bos."
-    return "Workspace icerigi:\n" + "\n".join([f"  {f.relative_to(WORKSPACE)}" for f in sorted(files) if f.is_file()])
+    visible = []
+    for f in sorted(files):
+        if f.is_file() and is_scope_allowed(f, scope):
+            visible.append(f"  {f.relative_to(WORKSPACE)}")
+    if not visible:
+        return f"Scope '{scope}' icin görünür dosya yok."
+    return "Workspace icerigi:\n" + "\n".join(visible)
 
-def read_file(filename: str) -> tuple[str, str]:
+def read_file(filename: str, scope: str = "general") -> tuple[str, str]:
     """Güvenli dosya okuma."""
-    path = safe_path(filename)
+    path = scoped_path(filename, scope=scope)
     if path is None:
-        return "", "Güvenlik: Workspace dışına çıkış engellendi."
+        return "", "Güvenlik: Bu scope için dosya erişimi engellendi."
     if not path.exists():
-        matches = list(WORKSPACE.rglob(filename))
+        matches = [m for m in WORKSPACE.rglob(filename) if m.is_file() and is_scope_allowed(m, scope)]
         if not matches:
             logger.warning(f"📄 Dosya bulunamadı: {filename}")
             return "", f"'{filename}' bulunamadi."
@@ -658,12 +687,12 @@ def read_file(filename: str) -> tuple[str, str]:
         logger.error(f"❌ Dosya okuma hatası: {e}")
         return "", "Hata: Dosya okunamadı."
 
-def save_file(filename: str, content: str) -> str:
+def save_file(filename: str, content: str, scope: str = "general") -> str:
     """Güvenli dosya yazma - boyut sınırı ile."""
-    path = safe_path(filename)
+    path = scoped_path(filename, scope=scope)
     if path is None:
         logger.warning(f"🚫 Dosya yazma engellendi: {filename}")
-        return "Güvenlik: Engellendi."
+        return "Güvenlik: Bu scope için yazma engellendi."
     if not is_allowed_write_file(path):
         logger.warning(f"🚫 Desteklenmeyen dosya uzantısı: {filename}")
         return "Güvenlik: Sadece .md, .txt, .json, .yaml, .yml ve .csv dosyaları yazılabilir."
@@ -685,12 +714,12 @@ def save_file(filename: str, content: str) -> str:
         logger.error(f"❌ Dosya yazma hatası: {e}")
         return "Hata: Dosya kaydedilemedi."
 
-def append_file(filename: str, content: str) -> str:
+def append_file(filename: str, content: str, scope: str = "general") -> str:
     """Güvenli dosya ekleme - tarih/saat damgası ile."""
-    path = safe_path(filename)
+    path = scoped_path(filename, scope=scope)
     if path is None:
         logger.warning(f"🚫 Dosya ekleme engellendi: {filename}")
-        return "Güvenlik: Engellendi."
+        return "Güvenlik: Bu scope için ekleme engellendi."
     if not is_allowed_write_file(path):
         logger.warning(f"🚫 Desteklenmeyen dosya uzantısı: {filename}")
         return "Güvenlik: Sadece .md, .txt, .json, .yaml, .yml ve .csv dosyalarına ek yapılabilir."
@@ -719,12 +748,12 @@ def append_file(filename: str, content: str) -> str:
         logger.error(f"❌ Dosya ekleme hatası: {e}")
         return "Hata: Dosyaya eklenemedi."
 
-def delete_file(filename: str) -> str:
+def delete_file(filename: str, scope: str = "general") -> str:
     """Güvenli dosya silme - sadece workspace icindeki normal dosyalar."""
-    path = safe_path(filename)
+    path = scoped_path(filename, scope=scope)
     if path is None:
         logger.warning(f"🚫 Dosya silme engellendi: {filename}")
-        return "Güvenlik: Engellendi."
+        return "Güvenlik: Bu scope için silme engellendi."
     if not is_allowed_write_file(path):
         logger.warning(f"🚫 Desteklenmeyen dosya uzantısı silme isteği: {filename}")
         return "Güvenlik: Sadece güvenli not/veri dosyaları silinebilir."
@@ -834,7 +863,8 @@ def build_security_report() -> str:
 - Workspace sınırı: Dosya yolları `resolve()` + `is_relative_to(WORKSPACE)` ile workspace dışına çıkamaz.
 - Yazma/silme sınırı: Sadece {", ".join(sorted(ALLOWED_WRITE_EXTENSIONS))} uzantıları desteklenir.
 - Silme sınırı: Klasörler ve gizli dosyalar silinmez.
-- Yazma onayı: `/yaz`, `/ekle`, `/sil`, `/fikir`, `/senaryo`, `/rapor` işlemleri Telegram onay butonu ister.
+- Yazma onayı: `/yaz`, `/ekle`, `/sil`, `/fikir`, `/senaryo`, `/ara_senaryo`, `/rapor` işlemleri Telegram onay butonu ister.
+- Scope izolasyonu: `youtube` komutları `youtube/`, `notlar/`, `skills/youtube_icerik.md`, `skills/arastirma.md` alanında; `kod` komutları `projeler/` ve `skills/kod_yardimcisi.md` alanında çalışır.
 - Pending TTL: Onay bekleyen işlemler {PENDING_ACTION_TTL_SECONDS // 60} dakika sonra otomatik geçersiz olur.
 - SSRF koruması: Web aracı sadece `http/https`, public hostname/IP, redirect kapalı ve {MAX_WEB_BYTES // 1024 // 1024}MB yanıt limitiyle çalışır.
 - Web radar allowlist: {allowlist_state}
@@ -862,7 +892,7 @@ Bu rapor model tarafından tahmin edilmez; mevcut kod sabitlerinden ve güvenlik
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update): return
     if not check_rate_limit(str(update.effective_user.id)):
-        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiz. Lütfen bekleyiniz.")
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
         return
     logger.info(f"👤 Başlangıç komutu: {update.effective_user.id}")
     await update.message.reply_text(HELP_TEXT)
@@ -877,7 +907,7 @@ async def cmd_liste(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
         return
     logger.info(f"📋 Liste komutu: {update.effective_user.id}")
-    await update.message.reply_text(list_workspace_files())
+    await update.message.reply_text(list_workspace_files(scope="general"))
 
 async def cmd_oku(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update): return
@@ -890,7 +920,7 @@ async def cmd_oku(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Kullanım: /oku <dosya>")
         return
 
-    content, error = read_file(filename)
+    content, error = read_file(filename, scope="general")
     if error:
         await update.message.reply_text(error)
         return
@@ -915,6 +945,7 @@ async def cmd_yaz(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"'{filename}' dosyasına yazılsın mı?\n\n{content[:700]}",
         filename=filename,
         content=content,
+        scope="general",
     )
     await update.message.reply_text(preview, reply_markup=keyboard)
 
@@ -936,6 +967,7 @@ async def cmd_ekle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"'{filename}' dosyasına tarihli ek yapılsın mı?\n\n{content[:700]}",
         filename=filename,
         content=content,
+        scope="general",
     )
     await update.message.reply_text(preview, reply_markup=keyboard)
 
@@ -955,6 +987,7 @@ async def cmd_sil(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "delete",
         f"'{filename}' dosyası silinsin mi? Bu işlem geri alınamaz.",
         filename=filename,
+        scope="general",
     )
     await update.message.reply_text(preview, reply_markup=keyboard)
 
@@ -985,6 +1018,7 @@ async def cmd_fikir(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Not dosyana eklensin mi? ({NOTES_FILE})\n\n{sonuc[:1200]}",
         filename=NOTES_FILE,
         content=sonuc,
+        scope="youtube",
     )
     await update.message.reply_text(preview, reply_markup=keyboard)
 
@@ -1033,6 +1067,7 @@ async def cmd_ara_not(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Gemini araştırması not dosyana eklensin mi? ({NOTES_FILE})\n\n{sonuc[:1200]}",
         filename=NOTES_FILE,
         content=sonuc,
+        scope="youtube",
     )
     await update.message.reply_text(preview, reply_markup=keyboard)
 
@@ -1074,7 +1109,7 @@ async def cmd_ara_senaryo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     audit_event("gemini_scenario", user_id, konu[:120])
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     arastirma = gemini_grounded_research(konu)
-    kanal_tarzi, _ = read_file(CHANNEL_STYLE_FILE)
+    kanal_tarzi, _ = read_file(CHANNEL_STYLE_FILE, scope="youtube")
     if not kanal_tarzi:
         kanal_tarzi = "Kanal tarzı dosyası yok. Genel, net ve öğretici bir YouTube dili kullan."
 
@@ -1087,13 +1122,14 @@ async def cmd_ara_senaryo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Konu:\n{konu}"
     )
     sonuc = run_model_with_tools(MODELS["strateji"], prompt, build_system_prompt(MODELS["strateji"]))
-    out_name = f"youtube/ara_senaryo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+    out_name = f"youtube/senaryolar/ara_senaryo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
     preview, keyboard = set_pending(
         context,
         "save",
         f"Araştırmalı senaryo hazır. '{out_name}' olarak kaydedilsin mi?\n\n{sonuc[:1200]}",
         filename=out_name,
         content=sonuc,
+        scope="youtube",
     )
     await update.message.reply_text(preview, reply_markup=keyboard)
 
@@ -1114,6 +1150,7 @@ async def cmd_tarzim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Kanal tarzı '{CHANNEL_STYLE_FILE}' dosyasına kaydedilsin mi?\n\n{tarz[:900]}",
         filename=CHANNEL_STYLE_FILE,
         content=tarz,
+        scope="youtube",
     )
     await update.message.reply_text(preview, reply_markup=keyboard)
 
@@ -1129,7 +1166,7 @@ async def cmd_senaryo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    kanal_tarzi, _ = read_file(CHANNEL_STYLE_FILE)
+    kanal_tarzi, _ = read_file(CHANNEL_STYLE_FILE, scope="youtube")
     if not kanal_tarzi:
         kanal_tarzi = "Kanal tarzı dosyası yok. Genel, net, güçlü ve anlaşılır bir YouTube dili kullan."
 
@@ -1142,13 +1179,14 @@ async def cmd_senaryo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Video konusu:\n{konu}"
     )
     sonuc = run_model_with_tools(MODELS["strateji"], prompt, build_system_prompt(MODELS["strateji"]))
-    out_name = f"youtube/senaryo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+    out_name = f"youtube/senaryolar/senaryo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
     preview, keyboard = set_pending(
         context,
         "save",
         f"Senaryo hazır. '{out_name}' olarak kaydedilsin mi?\n\n{sonuc[:1200]}",
         filename=out_name,
         content=sonuc,
+        scope="youtube",
     )
     await update.message.reply_text(preview, reply_markup=keyboard)
 
@@ -1165,6 +1203,7 @@ async def cmd_kod(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     code_context = build_code_context()
+    code_style, _ = read_file(CODE_STYLE_FILE, scope="code")
     prompt = (
         "Aşağıdaki proje dosyalarını ve güvenlik guardrail'lerini okuyarak kod yardımı ver. "
         "Cevabını mevcut kodun gerçekten yaptığı şeylere göre kur. "
@@ -1176,7 +1215,8 @@ async def cmd_kod(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "resolve()+is_relative_to() varken '..' traversal açığı demek; not içeriğini sanitize ederek kullanıcı notlarını bozmayı önermek. "
         "Eğer cevap için izinli bağlamda olmayan başka dosya gerekiyorsa kullanıcıdan açıkça dosya adını istemesini söyle.\n\n"
         f"{CODE_REVIEW_GUARDRAILS}\n\n"
-        f"{list_workspace_files()}\n\n"
+        f"Kod yardimcisi skill talimatlari:\n{code_style[:4000]}\n\n"
+        f"{list_workspace_files(scope='code')}\n\n"
         f"Proje dosya bağlamı:\n{code_context}\n\n"
         f"Soru:\n{soru}"
     )
@@ -1201,10 +1241,12 @@ async def cmd_kod_patch(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     code_context = build_code_context()
+    code_style, _ = read_file(CODE_STYLE_FILE, scope="code")
     prompt = (
         "Sadece patch taslağı üret. Dosya yazma yok. "
         "Çıktı formatı: 1) Risk değerlendirmesi 2) Değişiklik planı 3) Örnek diff taslağı. "
         "Mevcut dosya bağlamına sadık kal.\n\n"
+        f"Kod yardimcisi skill talimatlari:\n{code_style[:4000]}\n\n"
         f"Bağlam:\n{code_context}\n\n"
         f"İstek:\n{istek}"
     )
@@ -1247,11 +1289,12 @@ async def cmd_rapor(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Detayli rapor yaz: {konu}",
             build_system_prompt(MODELS["strateji"]),
         )
-        out_name = f"rapor_{datetime.now().strftime('%H%M')}.md"
+        out_name = f"notlar/rapor_{datetime.now().strftime('%H%M')}.md"
         context.user_data["pending_save"] = {
             "filename": out_name,
             "content": sonuc,
             "created_at": datetime.now(timezone.utc).isoformat(),
+            "scope": "general",
         }
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("Kaydet", callback_data="save_pending:evet"),
@@ -1286,7 +1329,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 audit_event("pending_expired", user_id, "save_pending")
                 await query.edit_message_text("⏱️ Onay süresi doldu. İşlem iptal edildi.")
                 return
-            result = save_file(pending["filename"], pending["content"])
+            result = save_file(
+                pending["filename"],
+                pending["content"],
+                scope=pending.get("scope", "general"),
+            )
             context.user_data.pop("pending_save", None)
             audit_event("pending_save_apply", user_id, pending["filename"])
             await query.edit_message_text(result)
@@ -1304,12 +1351,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         action = pending.get("action")
+        scope = pending.get("scope", "general")
         if action == "save":
-            result = save_file(pending["filename"], pending["content"])
+            result = save_file(pending["filename"], pending["content"], scope=scope)
         elif action == "append":
-            result = append_file(pending["filename"], pending["content"])
+            result = append_file(pending["filename"], pending["content"], scope=scope)
         elif action == "delete":
-            result = delete_file(pending["filename"])
+            result = delete_file(pending["filename"], scope=scope)
         else:
             result = "Hata: Bilinmeyen işlem."
 

@@ -54,3 +54,13 @@ def test_gemini_daily_limit(vasi_module):
     assert vasi_module.check_gemini_daily_limit(user)
     assert vasi_module.check_gemini_daily_limit(user)
     assert not vasi_module.check_gemini_daily_limit(user)
+
+
+def test_scope_blocks_cross_domain_access(vasi_module):
+    p = vasi_module.scoped_path("youtube/senaryolar/video.md", scope="code")
+    assert p is None
+
+
+def test_scope_allows_code_domain_access(vasi_module):
+    p = vasi_module.scoped_path("projeler/oyunlar/idea.md", scope="code")
+    assert p is not None
