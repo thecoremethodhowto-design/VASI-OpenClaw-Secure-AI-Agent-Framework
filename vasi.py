@@ -6,7 +6,9 @@ import socket
 import requests
 import logging
 import html
+import time
 from functools import wraps
+from typing import Awaitable, Callable
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone, timedelta
@@ -19,6 +21,14 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, MessageHandler, CommandHandler,
     filters, ContextTypes, CallbackQueryHandler
+)
+from observability import (
+    HealthCheck,
+    ObservabilityStore,
+    format_health_report,
+    skills_health,
+    timed_check,
+    workspace_health,
 )
 
 load_dotenv()
@@ -77,6 +87,7 @@ logger = logging.getLogger('vasi')
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext").setLevel(logging.INFO)
+OBSERVABILITY = ObservabilityStore(logger)
 
 # Log Ollama setup durumunu başta
 logger.debug(logger_setup_msg)
@@ -173,6 +184,10 @@ Komutlar:
 /kod <soru> - Workspace bağlamıyla kod yardımı verir
 /kod_patch <istek> - Uygulanabilir patch taslağı üretir (dosya yazmaz)
 /guvenlik - Mevcut güvenlik kontrollerini deterministik raporlar
+/siniflandir <dosya> - Dosyanın veri sınıfını ve Gemini aktarım iznini gösterir
+/saglik - Bileşen sağlık durumunu gösterir
+/istatistik - Komut, hata ve model kullanım özetini gösterir
+/audit_ozet - Son olay ve audit özetini gösterir
 /rapor <konu> - Rapor taslağı üretir, onayla kaydeder
 """
 
@@ -259,6 +274,7 @@ def sanitize_for_log(text: str, max_len: int = 240) -> str:
 
 def audit_event(event: str, user_id: str, detail: str) -> None:
     logger.info(f"AUDIT | {event} | user={user_id} | {sanitize_for_log(detail)}")
+    OBSERVABILITY.record_audit(event, user_id, sanitize_for_log(detail))
 
 def safe_path(filename: str) -> Path | None:
     """Path traversal saldırılarına karşı korunan güvenli path çözümü."""
@@ -291,6 +307,59 @@ def scoped_path(filename: str, scope: str = "general") -> Path | None:
 
 def is_allowed_write_file(path: Path) -> bool:
     return path.suffix.lower() in ALLOWED_WRITE_EXTENSIONS
+
+# ── VERİ SINIFLANDIRMA ────────────────────────────────────────────────────────
+
+def _load_classification_policy() -> dict:
+    """policies/data_classification.yaml dosyasını okur."""
+    policy_path = Path(__file__).parent / "policies" / "data_classification.yaml"
+    if not policy_path.exists():
+        return {}
+    try:
+        import yaml
+        return yaml.safe_load(policy_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
+
+def classify_file(filepath: str | Path) -> str:
+    """
+    Dosya yoluna göre sınıf döndürür: PUBLIC, PRIVATE, PROJECT, SECRET.
+    Eşleşme yoksa policy'deki varsayılan (PRIVATE) döner.
+    """
+    policy  = _load_classification_policy()
+    default = policy.get("defaults", {}).get("unclassified", "PRIVATE")
+    patterns = policy.get("patterns", {})
+
+    path = Path(filepath)
+    try:
+        if path.is_absolute():
+            rel = str(path.resolve().relative_to(WORKSPACE)).replace("\\", "/")
+        else:
+            rel = str(path).replace("\\", "/")
+    except ValueError:
+        rel = str(path).replace("\\", "/")
+
+    import fnmatch
+    for classification, globs in patterns.items():
+        for pattern in globs:
+            if fnmatch.fnmatch(rel, pattern):
+                return classification
+
+    return default
+
+
+def is_gemini_allowed(filepath: str | Path) -> bool:
+    """Bu dosya Gemini'ye gönderilebilir mi?"""
+    policy         = _load_classification_policy()
+    classification = classify_file(filepath)
+    classes        = policy.get("classifications", {})
+    return classes.get(classification, {}).get("gemini_allowed", False)
+
+def classification_report_line(filepath: str | Path) -> str:
+    classification = classify_file(filepath)
+    gemini_state = "izinli" if is_gemini_allowed(filepath) else "kapalı"
+    return f"{filepath}: {classification} (Gemini dosya aktarımı: {gemini_state})"
 
 def mask_sensitive_line(line: str, filename: str) -> str:
     if filename != ".env.example":
@@ -558,13 +627,19 @@ def gemini_grounded_summary(topic: str) -> str:
         logger.error(f"❌ Gemini kısa özet hatası: {e}", exc_info=True)
         return "Hata: Gemini kısa özet üretilemedi."
 
-def run_model_with_tools(
+async def run_model_with_tools(
     model: str,
     user_prompt: str,
     system_prompt: str | None = None,
     options: dict | None = None,
+    on_tool_use: Callable[[], Awaitable[None]] | None = None,
 ) -> str:
-    """Ollama modelini guvenli tool whitelist'i ile calistirir."""
+    """Ollama modelini guvenli tool whitelist'i ile calistirir.
+
+    on_tool_use: Model bir arac cagirdiginda, arac calistirilmadan once
+    beklenen async bildirim. Kullanici deneyimi icin opsiyoneldir.
+    """
+    started = time.perf_counter()
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
@@ -580,11 +655,18 @@ def run_model_with_tools(
                 f"docker compose exec ollama ollama pull {model}"
             )
         logger.error(f"❌ Ollama model hatası: {e}", exc_info=True)
+        OBSERVABILITY.record_model_call(model, int((time.perf_counter() - started) * 1000), ok=False, error=str(e))
         return f"Model hatası: {getattr(e, 'error', str(e))}"
+    except Exception as e:
+        logger.error(f"❌ Ollama çağrı hatası: {e}", exc_info=True)
+        OBSERVABILITY.record_model_call(model, int((time.perf_counter() - started) * 1000), ok=False, error=str(e))
+        return f"Model çalıştırma hatası: {e}"
 
     message_data = response["message"]
 
     if message_data.get("tool_calls"):
+        if on_tool_use:
+            await on_tool_use()
         messages.append(message_data)
         for tool in message_data["tool_calls"]:
             func_name = tool["function"]["name"]
@@ -617,10 +699,20 @@ def run_model_with_tools(
                     f"docker compose exec ollama ollama pull {model}"
                 )
             logger.error(f"❌ Ollama final yanıt hatası: {e}", exc_info=True)
+            OBSERVABILITY.record_model_call(model, int((time.perf_counter() - started) * 1000), ok=False, error=str(e))
             return f"Model hatası: {getattr(e, 'error', str(e))}"
-        return final_response["message"].get("content", "")
+        except Exception as e:
+            logger.error(f"❌ Ollama final çağrı hatası: {e}", exc_info=True)
+            OBSERVABILITY.record_model_call(model, int((time.perf_counter() - started) * 1000), ok=False, error=str(e))
+            return f"Model çalıştırma hatası: {e}"
 
-    return message_data.get("content", "")
+        result = final_response["message"].get("content", "")
+        OBSERVABILITY.record_model_call(model, int((time.perf_counter() - started) * 1000), ok=True)
+        return result
+
+    result = message_data.get("content", "")
+    OBSERVABILITY.record_model_call(model, int((time.perf_counter() - started) * 1000), ok=True)
+    return result
 
 OPENCLAW_TOOLS = [
     {
@@ -811,7 +903,7 @@ def is_pending_expired(pending: dict) -> bool:
     return age > PENDING_ACTION_TTL_SECONDS
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 4. YÖNLENDİRME (ROUTING) VE BOT KOMUTLARI
+# 4. YÖNLENDİRME (ROUTING) VE BOT KOMUTLARI (SKILL_TRIGGERS VE MODELLERİN SEÇİMİ)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def pick_model(text: str) -> str:
@@ -820,7 +912,34 @@ def pick_model(text: str) -> str:
     if any(k in t for k in ["analiz", "gorsel", "tablo"]): return MODELS["gorsel"]
     if any(k in t for k in ["arastir", "neden", "web", "site", "okut"]): return MODELS["teknik"]
     if any(k in t for k in ["e-posta", "rapor", "taslak"]): return MODELS["strateji"]
+    
     return MODELS["gatekeeper"]
+
+def detect_skill(text: str) -> tuple[str, str]:
+    """Deterministik skill tespiti; evaluation ve DACE iskeleti için hafif sınıflandırıcı."""
+    t = text.lower()
+    youtube_terms = [
+        "youtube", "video", "senaryo", "script", "hook", "thumbnail",
+        "başlık", "baslik", "açıklama", "aciklama", "etiket", "kanal",
+    ]
+    code_terms = [
+        "kod", "script", "python", "javascript", "hata", "debug",
+        "refactor", "fonksiyon", "class", "api", "pytest", "unit test",
+        "birim test", "optimize",
+        "review", "oyun", "pygame", "uygulama", "proje",
+    ]
+    research_terms = [
+        "araştır", "arastir", "ara", "bul", "güncel", "guncel",
+        "haber", "trend", "ne var", "durum nedir", "son gelişmeler",
+        "son gelismeler",
+    ]
+    if any(term in t for term in youtube_terms):
+        return "youtube_icerik", "skills/youtube_icerik.md"
+    if any(term in t for term in code_terms):
+        return "kod_yardimcisi", "skills/kod_yardimcisi.md"
+    if any(term in t for term in research_terms):
+        return "arastirma", "skills/arastirma.md"
+    return "", ""
 
 def build_system_prompt(model: str) -> str:
     return (
@@ -869,6 +988,7 @@ def build_security_report() -> str:
 - SSRF koruması: Web aracı sadece `http/https`, public hostname/IP, redirect kapalı ve {MAX_WEB_BYTES // 1024 // 1024}MB yanıt limitiyle çalışır.
 - Web radar allowlist: {allowlist_state}
 - Gemini araştırması: Sadece `/ara`, `/ara_not`, `/ara_ozet` ve `/ara_senaryo` komutlarında çalışır; workspace dosyaları Gemini'ye otomatik gönderilmez.
+- Data classification: `PUBLIC`, `PRIVATE`, `PROJECT`, `SECRET` sınıfları policy dosyasından okunur; Gemini dosya aktarımı varsayılan kapalıdır.
 - Gemini rate limit: Kullanıcı başına {RATE_LIMIT_WINDOW} saniyede {GEMINI_RATE_LIMIT_REQUESTS} araştırma sınırı var.
 - Gemini günlük limit: Kullanıcı başına günlük {GEMINI_DAILY_LIMIT_REQUESTS} araştırma.
 - Tool whitelist: Model sadece {", ".join(sorted(ALLOWED_TOOL_NAMES))} araçlarını çağırabilir.
@@ -879,15 +999,44 @@ def build_security_report() -> str:
 - Gemini API key durumu: {"var" if bool(GEMINI_API_KEY) else "yok"}; model: `{GEMINI_MODEL}`.
 
 ## Gerçekçi Sıradaki İyileştirmeler
-1. Otomatik test ekle: `safe_path`, `is_safe_url`, yazma uzantısı, onay akışı için küçük unit testler.
-2. Log rotasyonu ekle: Uzun süreli kullanımda `/tmp/vasi_audit.log` veya host logları büyümesin.
-3. Birim testleri artır: `pending TTL`, `daily Gemini limit` ve allowlist akışlarını kapsa.
-4. Oran/limit ayarlarını `.env` üzerinden tamamen yönetilebilir yap.
-5. Audit satırlarını ayrı dosya veya merkezi log sistemine yönlendir.
+1. Log rotasyonu ekle: Uzun süreli kullanımda `/tmp/vasi_audit.log` veya host logları büyümesin.
+2. Audit satırlarını ayrı dosya veya merkezi log sistemine yönlendir.
+3. Oran/limit ayarlarını `.env` üzerinden tamamen yönetilebilir yap.
+4. Onay akışını tek mekanizmada birleştir: `/rapor` ayrı bir `pending_save` deseni kullanıyor, diğer komutlar `pending_action` kullanıyor.
+5. DACE Gateway: Karar, erişim, bağlam ve çalıştırma katmanlarını `vasi.py` içinden ayır.
 
 ## Not
 Bu rapor model tarafından tahmin edilmez; mevcut kod sabitlerinden ve güvenlik ayarlarından üretilir.
+Yukarıdaki iyileştirme listesi elle güncellenir.
 """
+
+def build_health_report() -> str:
+    checks = [
+        timed_check("Ollama", lambda: f"{len(get_ollama_model_names())} model hazır"),
+        build_gemini_health(),
+        workspace_health(WORKSPACE),
+        skills_health(WORKSPACE),
+        HealthCheck("PostgreSQL", "warn", details="henüz kurulmadı"),
+        HealthCheck("RAG", "warn", details="henüz kurulmadı"),
+    ]
+    return format_health_report(checks, OBSERVABILITY.last_command_summary())
+
+def get_ollama_model_names() -> list[str]:
+    response = ollama_client.list()
+    models = getattr(response, "models", response.get("models", []) if isinstance(response, dict) else [])
+    names = []
+    for model in models:
+        if isinstance(model, dict):
+            names.append(model.get("name") or model.get("model") or "")
+        else:
+            names.append(getattr(model, "model", "") or getattr(model, "name", ""))
+    return [name for name in names if name]
+
+def build_gemini_health() -> HealthCheck:
+    if not GEMINI_API_KEY:
+        return HealthCheck("Gemini", "warn", details="API key yok")
+    used = sum(count for _, count in GEMINI_DAILY_COUNTERS.values())
+    return HealthCheck("Gemini", "ok", details=f"yapılandırıldı, günlük {used}/{GEMINI_DAILY_LIMIT_REQUESTS}")
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update): return
@@ -1011,7 +1160,7 @@ async def cmd_fikir(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "YouTube/uygulama açısından olası kullanım, ilk 3 aksiyon.\n\n"
         f"Fikir: {fikir}"
     )
-    sonuc = run_model_with_tools(MODELS["teknik"], prompt, build_system_prompt(MODELS["teknik"]))
+    sonuc = await run_model_with_tools(MODELS["teknik"], prompt, build_system_prompt(MODELS["teknik"]))
     preview, keyboard = set_pending(
         context,
         "append",
@@ -1052,7 +1201,6 @@ async def cmd_ara_not(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_gemini_daily_limit(user_id):
         await update.message.reply_text("⚠️ Günlük Gemini araştırma limitine ulaştınız. Yarın tekrar deneyin.")
         return
-
     konu = " ".join(context.args).strip()
     if not konu:
         await update.message.reply_text("❌ Kullanım: /ara_not <araştırma konusu>")
@@ -1121,7 +1269,7 @@ async def cmd_ara_senaryo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Araştırma notları:\n{arastirma[:9000]}\n\n"
         f"Konu:\n{konu}"
     )
-    sonuc = run_model_with_tools(MODELS["strateji"], prompt, build_system_prompt(MODELS["strateji"]))
+    sonuc = await run_model_with_tools(MODELS["strateji"], prompt, build_system_prompt(MODELS["strateji"]))
     out_name = f"youtube/senaryolar/ara_senaryo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
     preview, keyboard = set_pending(
         context,
@@ -1172,13 +1320,13 @@ async def cmd_senaryo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     prompt = (
         "Aşağıdaki kanal tarzına göre YouTube videosu paketi hazırla. "
-        "Çıktı şu bölümleri içersin: 10 başlık önerisi, en iyi 3 başlığın gerekçesi, "
+        "Çıktı şu bölümleri içersin: 5 başlık önerisi, en iyi 2 başlığın gerekçesi, "
         "video açıklaması, 15 etiket, kapak görseli fikri, thumbnail üzerindeki kısa metinler, "
         "hook, bölüm bölüm senaryo, kapanış CTA.\n\n"
         f"Kanal tarzı:\n{kanal_tarzi[:6000]}\n\n"
         f"Video konusu:\n{konu}"
     )
-    sonuc = run_model_with_tools(MODELS["strateji"], prompt, build_system_prompt(MODELS["strateji"]))
+    sonuc = await run_model_with_tools(MODELS["strateji"], prompt, build_system_prompt(MODELS["strateji"]))
     out_name = f"youtube/senaryolar/senaryo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
     preview, keyboard = set_pending(
         context,
@@ -1220,7 +1368,7 @@ async def cmd_kod(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Proje dosya bağlamı:\n{code_context}\n\n"
         f"Soru:\n{soru}"
     )
-    sonuc = run_model_with_tools(
+    sonuc = await run_model_with_tools(
         MODELS["kod"],
         prompt,
         build_code_system_prompt(MODELS["kod"]),
@@ -1250,7 +1398,7 @@ async def cmd_kod_patch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Bağlam:\n{code_context}\n\n"
         f"İstek:\n{istek}"
     )
-    sonuc = run_model_with_tools(
+    sonuc = await run_model_with_tools(
         MODELS["kod"],
         prompt,
         build_code_system_prompt(MODELS["kod"]),
@@ -1258,6 +1406,24 @@ async def cmd_kod_patch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     for i in range(0, len(sonuc), 3900):
         await update.message.reply_text(sonuc[i:i+3900])
+
+async def cmd_siniflandir(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Bir dosyanın veri sınıfını ve Gemini aktarım iznini gösterir."""
+    if not is_authorized(update): return
+    if not check_rate_limit(str(update.effective_user.id)):
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
+        return
+
+    filename = " ".join(context.args).strip()
+    if not filename:
+        await update.message.reply_text(
+            "❌ Kullanım: /siniflandir <dosya>\n\n"
+            "Örnek: /siniflandir notlar/NOTES.md"
+        )
+        return
+
+    audit_event("classification_query", str(update.effective_user.id), filename[:120])
+    await update.message.reply_text(classification_report_line(filename))
 
 async def cmd_guvenlik(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update): return
@@ -1268,6 +1434,33 @@ async def cmd_guvenlik(update: Update, context: ContextTypes.DEFAULT_TYPE):
     report = build_security_report()
     for i in range(0, len(report), 3900):
         await update.message.reply_text(report[i:i+3900])
+
+async def cmd_saglik(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update): return
+    if not check_rate_limit(str(update.effective_user.id)):
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
+        return
+
+    report = build_health_report()
+    await update.message.reply_text(report)
+
+async def cmd_istatistik(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update): return
+    if not check_rate_limit(str(update.effective_user.id)):
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
+        return
+
+    report = OBSERVABILITY.format_statistics_report()
+    await update.message.reply_text(report)
+
+async def cmd_audit_ozet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update): return
+    if not check_rate_limit(str(update.effective_user.id)):
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
+        return
+
+    report = OBSERVABILITY.format_audit_summary()
+    await update.message.reply_text(report)
 
 async def cmd_rapor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update): return
@@ -1284,7 +1477,7 @@ async def cmd_rapor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-        sonuc = run_model_with_tools(
+        sonuc = await run_model_with_tools(
             MODELS["strateji"],
             f"Detayli rapor yaz: {konu}",
             build_system_prompt(MODELS["strateji"]),
@@ -1382,44 +1575,17 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     
     model = pick_model(metin)
-    messages = [
-        {"role": "system", "content": build_system_prompt(model)},
-        {"role": "user", "content": metin}
-    ]
+
+    async def notify_tool_use() -> None:
+        await update.message.reply_text("⚡ [OpenClaw] Ajan dis dunyadan veri cekiyor...")
 
     try:
-        # AŞAMA 1: Modeli Yeteneklerle Birlikte Çağır
-        response = ollama_client.chat(model=model, messages=messages, tools=OPENCLAW_TOOLS)
-        message_data = response["message"]
-        
-        # AŞAMA 2: Model Bir Yetenek Kullanmak İstedi Mi?
-        if message_data.get("tool_calls"):
-            await update.message.reply_text("⚡ [OpenClaw] Ajan dis dunyadan veri cekiyor...")
-            
-            messages.append(message_data) # Modelin isteğini geçmişe ekle
-            
-            for tool in message_data["tool_calls"]:
-                func_name = tool["function"]["name"]
-                args = tool["function"]["arguments"]
-                
-                # ✅ TOOL CALL VALIDATION: Whitelist kontrolü
-                if func_name not in ALLOWED_TOOL_NAMES:
-                    logger.warning(f"🚫 Yetkisiz tool çağrısı: {func_name}")
-                    tool_result = "Güvenlik: Bu araç kullanımı yasaktır."
-                elif func_name == "skill_get_time":
-                    tool_result = skill_get_time()
-                elif func_name == "skill_web_radar":
-                    tool_result = skill_web_radar(args.get("url", ""))
-                else:
-                    tool_result = "Bilinmeyen arac."
-                
-                messages.append({"role": "tool", "content": tool_result, "name": func_name})
-            
-            # AŞAMA 3: Aracı Kullandıktan Sonra Final Yorumunu Al
-            final_response = ollama_client.chat(model=model, messages=messages)
-            yanit = final_response["message"]["content"]
-        else:
-            yanit = message_data.get("content", "")
+        yanit = await run_model_with_tools(
+            model,
+            metin,
+            build_system_prompt(model),
+            on_tool_use=notify_tool_use,
+        )
 
         logger.info(f"✅ Yanıt hazırlandı: {user_id} (Model: {model})")
         for i in range(0, len(yanit), 4000):
@@ -1431,19 +1597,30 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except requests.RequestException as e:
         logger.error(f"🌐 Ollama iletişim hatası: {e}")
         await update.message.reply_text("❌ Model servisi ulaşılamıyor.")
-    except ResponseError as e:
-        if getattr(e, "status_code", None) == 404:
-            await update.message.reply_text(
-                f"❌ Model bulunamadı: {model}\n\n"
-                f"Önce şu komutla indir:\n"
-                f"docker compose exec ollama ollama pull {model}"
-            )
-        else:
-            logger.error(f"❌ Ollama model hatası: {e}", exc_info=True)
-            await update.message.reply_text(f"❌ Model hatası: {getattr(e, 'error', str(e))}")
     except Exception as e:
         logger.error(f"❌ Mesaj işleme kritik hatası: {e}", exc_info=True)
         await update.message.reply_text("❌ İçsel hata oluştu. Sistem yöneticisine başvurunuz.")
+
+def observed_command(command_name: str, handler):
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        started = time.perf_counter()
+        try:
+            result = await handler(update, context)
+            OBSERVABILITY.record_command(
+                command_name,
+                int((time.perf_counter() - started) * 1000),
+                ok=True,
+            )
+            return result
+        except Exception as exc:
+            OBSERVABILITY.record_command(
+                command_name,
+                int((time.perf_counter() - started) * 1000),
+                ok=False,
+                error=str(exc),
+            )
+            raise
+    return wrapper
 
 if __name__ == "__main__":
     try:
@@ -1455,24 +1632,28 @@ if __name__ == "__main__":
         logger.info("="*60)
         
         app = Application.builder().token(TOKEN).build()
-        app.add_handler(CommandHandler("start", cmd_start))
-        app.add_handler(CommandHandler("yardim", cmd_yardim))
-        app.add_handler(CommandHandler("liste", cmd_liste))
-        app.add_handler(CommandHandler("oku", cmd_oku))
-        app.add_handler(CommandHandler("yaz", cmd_yaz))
-        app.add_handler(CommandHandler("ekle", cmd_ekle))
-        app.add_handler(CommandHandler("sil", cmd_sil))
-        app.add_handler(CommandHandler("fikir", cmd_fikir))
-        app.add_handler(CommandHandler("ara", cmd_ara))
-        app.add_handler(CommandHandler("ara_not", cmd_ara_not))
-        app.add_handler(CommandHandler("ara_ozet", cmd_ara_ozet))
-        app.add_handler(CommandHandler("ara_senaryo", cmd_ara_senaryo))
-        app.add_handler(CommandHandler("tarzim", cmd_tarzim))
-        app.add_handler(CommandHandler("senaryo", cmd_senaryo))
-        app.add_handler(CommandHandler("kod", cmd_kod))
-        app.add_handler(CommandHandler("kod_patch", cmd_kod_patch))
-        app.add_handler(CommandHandler("guvenlik", cmd_guvenlik))
-        app.add_handler(CommandHandler("rapor", cmd_rapor))
+        app.add_handler(CommandHandler("start", observed_command("start", cmd_start)))
+        app.add_handler(CommandHandler("yardim", observed_command("yardim", cmd_yardim)))
+        app.add_handler(CommandHandler("liste", observed_command("liste", cmd_liste)))
+        app.add_handler(CommandHandler("oku", observed_command("oku", cmd_oku)))
+        app.add_handler(CommandHandler("yaz", observed_command("yaz", cmd_yaz)))
+        app.add_handler(CommandHandler("ekle", observed_command("ekle", cmd_ekle)))
+        app.add_handler(CommandHandler("sil", observed_command("sil", cmd_sil)))
+        app.add_handler(CommandHandler("fikir", observed_command("fikir", cmd_fikir)))
+        app.add_handler(CommandHandler("ara", observed_command("ara", cmd_ara)))
+        app.add_handler(CommandHandler("ara_not", observed_command("ara_not", cmd_ara_not)))
+        app.add_handler(CommandHandler("ara_ozet", observed_command("ara_ozet", cmd_ara_ozet)))
+        app.add_handler(CommandHandler("ara_senaryo", observed_command("ara_senaryo", cmd_ara_senaryo)))
+        app.add_handler(CommandHandler("tarzim", observed_command("tarzim", cmd_tarzim)))
+        app.add_handler(CommandHandler("senaryo", observed_command("senaryo", cmd_senaryo)))
+        app.add_handler(CommandHandler("kod", observed_command("kod", cmd_kod)))
+        app.add_handler(CommandHandler("kod_patch", observed_command("kod_patch", cmd_kod_patch)))
+        app.add_handler(CommandHandler("guvenlik", observed_command("guvenlik", cmd_guvenlik)))
+        app.add_handler(CommandHandler("siniflandir", observed_command("siniflandir", cmd_siniflandir)))
+        app.add_handler(CommandHandler("saglik", observed_command("saglik", cmd_saglik)))
+        app.add_handler(CommandHandler("istatistik", observed_command("istatistik", cmd_istatistik)))
+        app.add_handler(CommandHandler("audit_ozet", observed_command("audit_ozet", cmd_audit_ozet)))
+        app.add_handler(CommandHandler("rapor", observed_command("rapor", cmd_rapor)))
         app.add_handler(CallbackQueryHandler(callback_handler))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
         

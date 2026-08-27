@@ -1,0 +1,6 @@
+id: "04_not_ekleme"
+description: "Not alma — tarih damgası içermeli"
+input: "Bugünkü test notu"
+expected:
+  skill: ""
+  response_contains: ["2026", "eklendi"]

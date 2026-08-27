@@ -64,3 +64,74 @@ def test_scope_blocks_cross_domain_access(vasi_module):
 def test_scope_allows_code_domain_access(vasi_module):
     p = vasi_module.scoped_path("projeler/oyunlar/idea.md", scope="code")
     assert p is not None
+
+
+def test_gemini_health_without_api_key_warns(vasi_module):
+    result = vasi_module.build_gemini_health()
+    assert result.status == "warn"
+    assert "API key yok" in result.details
+
+
+def test_detect_skill_youtube(vasi_module):
+    skill, path = vasi_module.detect_skill("Docker güvenliği için YouTube hook yaz")
+    assert skill == "youtube_icerik"
+    assert path == "skills/youtube_icerik.md"
+
+
+def test_detect_skill_code(vasi_module):
+    skill, path = vasi_module.detect_skill("Pygame ile top yakalama oyunu kodu yaz")
+    assert skill == "kod_yardimcisi"
+    assert path == "skills/kod_yardimcisi.md"
+
+
+def test_detect_skill_note_test_does_not_trigger_code(vasi_module):
+    skill, path = vasi_module.detect_skill("Bugünkü test notu")
+    assert skill == ""
+    assert path == ""
+
+
+def test_detect_skill_pytest_triggers_code(vasi_module):
+    skill, path = vasi_module.detect_skill("safe_path için pytest testi yaz")
+    assert skill == "kod_yardimcisi"
+    assert path == "skills/kod_yardimcisi.md"
+
+
+def test_detect_skill_research(vasi_module):
+    skill, path = vasi_module.detect_skill("2026 yapay zeka trendlerini araştır")
+    assert skill == "arastirma"
+    assert path == "skills/arastirma.md"
+
+
+def test_classify_file_defaults_to_private(vasi_module):
+    assert vasi_module.classify_file("unknown/freeform.md") == "PRIVATE"
+
+
+def test_classify_file_secret(vasi_module):
+    assert vasi_module.classify_file(".env") == "SECRET"
+    assert not vasi_module.is_gemini_allowed(".env")
+
+
+def test_classify_file_private_notes(vasi_module):
+    assert vasi_module.classify_file("notlar/NOTES.md") == "PRIVATE"
+    assert not vasi_module.is_gemini_allowed("notlar/NOTES.md")
+
+
+def test_classify_file_project(vasi_module):
+    assert vasi_module.classify_file("vasi.py") == "PROJECT"
+    assert not vasi_module.is_gemini_allowed("vasi.py")
+
+
+def test_classify_file_public_but_gemini_file_export_closed(vasi_module):
+    assert vasi_module.classify_file("youtube/senaryolar/video.md") == "PUBLIC"
+    assert not vasi_module.is_gemini_allowed("youtube/senaryolar/video.md")
+
+
+def test_classify_absolute_workspace_file(vasi_module):
+    target = vasi_module.WORKSPACE / "notlar" / "NOTES.md"
+    assert vasi_module.classify_file(target) == "PRIVATE"
+
+
+def test_classification_report_line(vasi_module):
+    line = vasi_module.classification_report_line("README.md")
+    assert "PUBLIC" in line
+    assert "Gemini dosya aktarımı: kapalı" in line

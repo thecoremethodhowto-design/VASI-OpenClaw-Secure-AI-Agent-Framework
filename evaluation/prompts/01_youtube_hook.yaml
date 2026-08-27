@@ -1,0 +1,7 @@
+id: "01_youtube_hook"
+description: "YouTube hook üretimi — youtube_icerik skill tetiklenmeli"
+input: "Docker güvenliği 2026 için YouTube videosu hook yaz"
+expected:
+  skill: "youtube_icerik"
+  response_contains: ["hook", "başlık"]
+  should_not_contain: ["hata", "bulunamadı"]

@@ -1,0 +1,53 @@
+# Vasi Veri Sınıflandırma Politikası
+# Bu dosya hangi dosyanın hangi servise gönderilebileceğini tanımlar.
+# Sınıflandırılmamış dosyalar varsayılan olarak PRIVATE sayılır.
+
+defaults:
+  unclassified: PRIVATE
+
+classifications:
+  PUBLIC:
+    description: "Araştırma notları, senaryo taslakları, genel içerik"
+    gemini_allowed: false
+    rag_allowed: true
+    external_share_allowed: true
+
+  PRIVATE:
+    description: "Kişisel notlar, günlük kayıtlar"
+    gemini_allowed: false
+    rag_allowed: false
+    external_share_allowed: false
+
+  PROJECT:
+    description: "Kod dosyaları, teknik dökümanlar"
+    gemini_allowed: false
+    rag_allowed: true
+    external_share_allowed: false
+
+  SECRET:
+    description: "API anahtarları, şifreler, kimlik bilgileri"
+    gemini_allowed: false
+    rag_allowed: false
+    external_share_allowed: false
+
+# Klasör/uzantı bazlı otomatik sınıflandırma
+patterns:
+  PUBLIC:
+    - "youtube/**"
+    - "arastirma/**"
+    - "README*"
+
+  PRIVATE:
+    - "notlar/**"
+
+  PROJECT:
+    - "projeler/**"
+    - "*.py"
+
+  SECRET:
+    - ".env*"
+    - "**/.env*"
+    - "secrets*"
+    - "**/secrets*"
+    - "api_keys*"
+    - "**/api_keys*"

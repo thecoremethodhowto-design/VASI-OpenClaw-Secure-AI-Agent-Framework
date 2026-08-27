@@ -1,0 +1,7 @@
+id: "02_kod_oyun"
+description: "Pygame oyun kodu — kod_yardimcisi skill tetiklenmeli"
+input: "Basit top yakalama oyunu için pygame kodu yaz"
+expected:
+  skill: "kod_yardimcisi"
+  response_contains: ["pygame", "import", "def"]
+  should_not_contain: ["hata", "bulunamadı"]

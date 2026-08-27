@@ -1,0 +1,6 @@
+id: "05_model_secim"
+description: "Araştırma isteği — teknik model seçilmeli"
+input: "yapay zeka trendlerini açıkla ve karşılaştır"
+expected:
+  model_role: "teknik"
+  skill: "arastirma"

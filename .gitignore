@@ -30,3 +30,6 @@ workspace/notlar/*
 !workspace/skills/
 workspace/skills/*
 !workspace/skills/*.md
+# Evaluation sonuçları — kişisel, repoya girmesin
+evaluation/results/*
+!evaluation/results/.gitkeep
