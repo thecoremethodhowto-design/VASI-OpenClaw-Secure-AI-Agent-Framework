@@ -67,6 +67,3 @@ networks:
     driver: bridge
 volumes:
   ollama_data:
-
- 
-

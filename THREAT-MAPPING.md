@@ -285,8 +285,9 @@ amaçlar. Aşağıdakiler bilinen boşluklardır:
 
 Bu eşleştirmenin dayandığı tehdit analizleri:
 
-- Video serisi: [link]
-- Yazılı analiz: [blog linki]
+- Video serisi: (https://www.youtube.com/playlist?list=PLBBE0OPKw-qys4AjXB-Wn-mEw4uxS-MzK) (SİBER GÜVENLİK LABORATUVARI)
+  https://www.youtube.com/playlist?list=PLBBE0OPKw-qyTjMn4rRN0JEoeGcwf733j (DİJİTAL VASİ)
+- Yazılı analiz: (https://www.thecoremethodhowto.com/ai-mastery-blog)
 
 Referans çerçeveler:
 - [MITRE ATT&CK](https://attack.mitre.org)
