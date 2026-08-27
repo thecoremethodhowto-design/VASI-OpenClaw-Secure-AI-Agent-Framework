@@ -1,10 +1,12 @@
-FROM python:3.11-slim
+FROM python@sha256:a630a63cdb314e2d138a2fca3e375e319e8568346ffafac5b980f888630ac4f1
+
 
 WORKDIR /app
 
 # Sistem paketleri
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 # Python bağımlılıkları
@@ -13,6 +15,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Uygulama dosyaları
 COPY vasi.py .
+COPY observability.py .
+COPY evaluation ./evaluation
+COPY policies ./policies
 COPY tests ./tests
 COPY pytest.ini .
 
