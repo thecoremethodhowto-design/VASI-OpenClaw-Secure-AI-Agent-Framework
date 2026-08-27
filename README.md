@@ -212,8 +212,9 @@ Not: `down --volumes` compose volume verilerini de siler.
 
 Bu sistemin tasarim kararlarinin dayandigi tehdit analizleri:
 
-- **Video serisi:** [link]
-- **Yazili analiz:** [blog linki]
+- **Video serisi:** (https://www.youtube.com/playlist?list=PLBBE0OPKw-qys4AjXB-Wn-mEw4uxS-MzK) (SİBER GÜVENLİK LABORATUVARI)
+https://www.youtube.com/playlist?list=PLBBE0OPKw-qyTjMn4rRN0JEoeGcwf733j (DİJİTAL VASİ)
+- **Yazili analiz:** (https://www.thecoremethodhowto.com/ai-mastery-blog)
 
 Referans cerceveler:
 - [MITRE ATT&CK](https://attack.mitre.org)
