@@ -1,6 +1,6 @@
 services:
   ollama:
-    image: ollama/ollama:0.12.6
+    image: ollama/ollama@sha256:a61a8fd395dbb931cc8cb1b5da7a2510746575c87113fdc45b647ee59ef7f808
     container_name: vasi-ollama-local
     profiles:
       - local-ollama
@@ -50,6 +50,7 @@ services:
       VASI_MODEL_TEKNIK: ${VASI_MODEL_TEKNIK:-qwen3:30b}
       VASI_MODEL_KOD: ${VASI_MODEL_KOD:-qwen3-coder:30b}
       VASI_MODEL_GORSEL: ${VASI_MODEL_GORSEL:-qwen3:30b}
+      TZ: ${TZ:-Europe/Istanbul}
     restart: unless-stopped
     networks:
       - vasi-network
@@ -64,6 +65,10 @@ services:
 networks:
   vasi-network:
     driver: bridge
-
 volumes:
+  ollama_data:
+
+ 
+
+
   ollama_data:
