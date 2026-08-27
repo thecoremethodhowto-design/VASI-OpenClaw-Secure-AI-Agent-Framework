@@ -7,7 +7,7 @@ issue açmayın.**
 
 Bunun yerine doğrudan iletişime geçin:
 
-- **E-posta:** [buraya kendi e-posta adresinizi yazın]
+- **E-posta:** thecoremethod.howto.01@gmail.com
 
 Bildiriminizde şunları paylaşmanız değerlendirmeyi hızlandırır:
 
