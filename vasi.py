@@ -80,6 +80,31 @@ from context import (
     read_project_file_for_context,
 )
 
+# ── EXECUTION KATMANI (DACE) ──────────────────────────────────────────────────
+import execution
+from execution import (
+    MAX_FILE_SIZE,
+    MAX_WEB_BYTES,
+    MAX_WEB_TIMEOUT,
+    append_file,
+    delete_file,
+    list_workspace_files,
+    read_file,
+    save_file,
+    skill_get_time,
+    skill_web_radar,
+    split_filename_and_content,
+)
+
+# ── DECISION KATMANI (DACE) ───────────────────────────────────────────────────
+import decision
+from decision import (
+    MODELS,
+    detect_skill,
+    pick_model,
+    skill_scope,
+)
+
 # ── ENVIRONMENT VALIDATION ────────────────────────────────────────────────────
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://host.docker.internal:11434")
@@ -136,20 +161,10 @@ OBSERVABILITY = ObservabilityStore(logger)
 logger.debug(logger_setup_msg)
 
 # ── CONSTANTS ────────────────────────────────────────────────────────────────
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
-MAX_WEB_TIMEOUT = 10  # saniye
-MAX_WEB_BYTES = 2 * 1024 * 1024  # 2MB
 
 # ── RATE LIMITING ───────────────────────────────────────────────────────────
 
 # ── MODEL KADROSU ──────────────────────────────────────────────────────────────
-MODELS = {
-    "gatekeeper": os.getenv("VASI_MODEL_GATEKEEPER", "llama3.1:8b"),
-    "strateji":   os.getenv("VASI_MODEL_STRATEJI", "llama3.1:8b"),
-    "teknik":     os.getenv("VASI_MODEL_TEKNIK", "llama3.1:8b"),
-    "kod":        os.getenv("VASI_MODEL_KOD", "qwen3-coder:30b"),
-    "gorsel":     os.getenv("VASI_MODEL_GORSEL", "llama3.1:8b"),
-}
 
 # ── ALLOWED TOOLS WHITELIST ────────────────────────────────────────────────────
 
@@ -196,74 +211,6 @@ def audit_event(event: str, user_id: str, detail: str) -> None:
 # 2. OPENCLAW YETENEKLERİ (READ-ONLY TOOLS)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def skill_get_time() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-def skill_web_radar(url: str) -> str:
-    """Güvenli web scraping - SSRF ve XSS korumalı."""
-    if not is_safe_url(url):
-        logger.warning(f"🚫 Güvensiz URL reddedildi: {url}")
-        return "Hata: Güvensiz veya geçersiz URL."
-    
-    try:
-        headers = {"User-Agent": "Mozilla/5.0 (compatible; Vasi-Bot/1.0)"}
-        response = requests.get(
-            url,
-            headers=headers,
-            timeout=MAX_WEB_TIMEOUT,
-            allow_redirects=False,
-            stream=True,
-        )
-        response.raise_for_status()
-
-        if 300 <= response.status_code < 400:
-            logger.warning(f"🚫 Redirect engellendi: {url} -> {response.headers.get('Location')}")
-            return "Hata: Yonlendirme guvenlik nedeniyle engellendi."
-
-        content_type = response.headers.get("Content-Type", "")
-        if content_type and "text/html" not in content_type and "text/plain" not in content_type:
-            logger.warning(f"🚫 Desteklenmeyen içerik türü: {content_type}")
-            return "Hata: Desteklenmeyen icerik turu."
-
-        chunks = []
-        total = 0
-        for chunk in response.iter_content(chunk_size=65536):
-            if not chunk:
-                continue
-            total += len(chunk)
-            if total > MAX_WEB_BYTES:
-                logger.warning(f"🚫 Web yanıtı çok büyük: {url}")
-                return "Hata: Web yaniti cok buyuk."
-            chunks.append(chunk)
-        
-        # Charset kontrol et
-        if response.encoding is None:
-            response.encoding = 'utf-8'
-
-        response_text = b"".join(chunks).decode(response.encoding, errors="replace")
-        
-        soup = BeautifulSoup(response_text, 'html.parser')
-        
-        # Tehlikeli elementleri kaldır
-        for element in soup(["script", "style", "iframe", "object"]):
-            element.decompose()
-        
-        text = soup.get_text(separator=' ', strip=True)
-        
-        # HTML entities'i escape et (XSS koruması)
-        text = html.escape(text)
-        
-        logger.info(f"✅ Web radar: {url[:50]}...")
-        return text[:8000] if len(text) > 8000 else text
-    except requests.Timeout:
-        logger.error(f"⏱️ Web radar timeout: {url}")
-        return "Hata: Istek zaman asımı (timeout)."
-    except requests.RequestException as e:
-        logger.error(f"🌐 Web radar hatasI: {e}")
-        return f"Radar Hatasi: Sayfa yüklenemedi."
-    except Exception as e:
-        logger.error(f"❌ Web radar kritik hata: {e}", exc_info=True)
-        return "Radar Hatasi: İçsel hata."
 
 def extract_gemini_sources(response) -> list[str]:
     """Gemini grounding metadata icinden okunabilir kaynak listesini cikarir."""
@@ -466,143 +413,6 @@ OPENCLAW_TOOLS = [
 # 3. DOSYA İŞLEMLERİ (KAPALI DEVRE)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def list_workspace_files(scope: str = "general") -> str:
-    files = list(WORKSPACE.rglob("*"))
-    if not files: return "Workspace bos."
-    visible = []
-    for f in sorted(files):
-        if f.is_file() and is_scope_allowed(f, scope):
-            visible.append(f"  {f.relative_to(WORKSPACE)}")
-    if not visible:
-        return f"Scope '{scope}' icin görünür dosya yok."
-    return "Workspace icerigi:\n" + "\n".join(visible)
-
-def read_file(filename: str, scope: str = "general") -> tuple[str, str]:
-    """Güvenli dosya okuma."""
-    path = scoped_path(filename, scope=scope)
-    if path is None:
-        return "", "Güvenlik: Bu scope için dosya erişimi engellendi."
-    if not path.exists():
-        matches = [m for m in WORKSPACE.rglob(filename) if m.is_file() and is_scope_allowed(m, scope)]
-        if not matches:
-            logger.warning(f"📄 Dosya bulunamadı: {filename}")
-            return "", f"'{filename}' bulunamadi."
-        path = matches[0]
-    try:
-        if not path.is_file():
-            return "", "Hata: Sadece dosya okunabilir."
-        if path.stat().st_size > MAX_FILE_SIZE:
-            logger.warning(f"📦 Okuma engellendi, dosya çok büyük: {filename}")
-            return "", f"Hata: Dosya çok büyük (max {MAX_FILE_SIZE / 1024 / 1024:.0f}MB)."
-        content = path.read_text(encoding="utf-8", errors="replace")
-        logger.info(f"📖 Dosya okundu: {path.relative_to(WORKSPACE)}")
-        return content[:12000], ""
-    except PermissionError:
-        logger.error(f"🚫 İzin hatası: {filename}")
-        return "", f"Hata: Dosya erişim izni yok."
-    except Exception as e:
-        logger.error(f"❌ Dosya okuma hatası: {e}")
-        return "", "Hata: Dosya okunamadı."
-
-def save_file(filename: str, content: str, scope: str = "general") -> str:
-    """Güvenli dosya yazma - boyut sınırı ile."""
-    path = scoped_path(filename, scope=scope)
-    if path is None:
-        logger.warning(f"🚫 Dosya yazma engellendi: {filename}")
-        return "Güvenlik: Bu scope için yazma engellendi."
-    if not is_allowed_write_file(path):
-        logger.warning(f"🚫 Desteklenmeyen dosya uzantısı: {filename}")
-        return "Güvenlik: Sadece .md, .txt, .json, .yaml, .yml ve .csv dosyaları yazılabilir."
-    
-    # File size kontrolü
-    if len(content) > MAX_FILE_SIZE:
-        logger.warning(f"📦 Dosya çok büyük: {filename} ({len(content)} bytes)")
-        return f"Hata: Dosya çok büyük (max {MAX_FILE_SIZE / 1024 / 1024:.0f}MB)."
-    
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-        logger.info(f"💾 Dosya kaydedildi: {path.relative_to(WORKSPACE)} ({len(content)} bytes)")
-        return f"'{filename}' kaydedildi."
-    except PermissionError:
-        logger.error(f"🚫 Yazma izni yok: {filename}")
-        return "Hata: Dosya yazma izni yok."
-    except Exception as e:
-        logger.error(f"❌ Dosya yazma hatası: {e}")
-        return "Hata: Dosya kaydedilemedi."
-
-def append_file(filename: str, content: str, scope: str = "general") -> str:
-    """Güvenli dosya ekleme - tarih/saat damgası ile."""
-    path = scoped_path(filename, scope=scope)
-    if path is None:
-        logger.warning(f"🚫 Dosya ekleme engellendi: {filename}")
-        return "Güvenlik: Bu scope için ekleme engellendi."
-    if not is_allowed_write_file(path):
-        logger.warning(f"🚫 Desteklenmeyen dosya uzantısı: {filename}")
-        return "Güvenlik: Sadece .md, .txt, .json, .yaml, .yml ve .csv dosyalarına ek yapılabilir."
-
-    stamped_content = (
-        f"\n\n---\n"
-        f"### {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-        f"{content.strip()}\n"
-    )
-
-    current_size = path.stat().st_size if path.exists() and path.is_file() else 0
-    if current_size + len(stamped_content.encode("utf-8")) > MAX_FILE_SIZE:
-        logger.warning(f"📦 Dosya ekleme limiti aşıldı: {filename}")
-        return f"Hata: Dosya çok büyük olur (max {MAX_FILE_SIZE / 1024 / 1024:.0f}MB)."
-
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(stamped_content)
-        logger.info(f"➕ Dosyaya eklendi: {path.relative_to(WORKSPACE)}")
-        return f"'{filename}' dosyasına tarihli kayıt eklendi."
-    except PermissionError:
-        logger.error(f"🚫 Yazma izni yok: {filename}")
-        return "Hata: Dosya yazma izni yok."
-    except Exception as e:
-        logger.error(f"❌ Dosya ekleme hatası: {e}")
-        return "Hata: Dosyaya eklenemedi."
-
-def delete_file(filename: str, scope: str = "general") -> str:
-    """Güvenli dosya silme - sadece workspace icindeki normal dosyalar."""
-    path = scoped_path(filename, scope=scope)
-    if path is None:
-        logger.warning(f"🚫 Dosya silme engellendi: {filename}")
-        return "Güvenlik: Bu scope için silme engellendi."
-    if not is_allowed_write_file(path):
-        logger.warning(f"🚫 Desteklenmeyen dosya uzantısı silme isteği: {filename}")
-        return "Güvenlik: Sadece güvenli not/veri dosyaları silinebilir."
-
-    if path.name.startswith("."):
-        return "Güvenlik: Gizli/korumalı dosyalar silinemez."
-    if not path.exists():
-        return f"'{filename}' bulunamadi."
-    if not path.is_file():
-        return "Hata: Sadece dosya silinebilir."
-
-    try:
-        relative = path.relative_to(WORKSPACE)
-        path.unlink()
-        logger.warning(f"🗑️ Dosya silindi: {relative}")
-        return f"'{relative}' silindi."
-    except PermissionError:
-        logger.error(f"🚫 Silme izni yok: {filename}")
-        return "Hata: Dosya silme izni yok."
-    except Exception as e:
-        logger.error(f"❌ Dosya silme hatası: {e}")
-        return "Hata: Dosya silinemedi."
-
-def split_filename_and_content(text: str) -> tuple[str, str] | None:
-    if "|" not in text:
-        return None
-    filename, content = text.split("|", 1)
-    filename = filename.strip()
-    content = content.strip()
-    if not filename or not content:
-        return None
-    return filename, content
 
 def set_pending(context: ContextTypes.DEFAULT_TYPE, action: str, preview: str, **payload):
     context.user_data["pending_action"] = {
@@ -631,40 +441,6 @@ def is_pending_expired(pending: dict) -> bool:
 # 4. YÖNLENDİRME (ROUTING) VE BOT KOMUTLARI (SKILL_TRIGGERS VE MODELLERİN SEÇİMİ)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def pick_model(text: str) -> str:
-    t = text.lower()
-    if any(k in t for k in ["kod", "script", "python"]): return MODELS["kod"]
-    if any(k in t for k in ["analiz", "gorsel", "tablo"]): return MODELS["gorsel"]
-    if any(k in t for k in ["arastir", "neden", "web", "site", "okut"]): return MODELS["teknik"]
-    if any(k in t for k in ["e-posta", "rapor", "taslak"]): return MODELS["strateji"]
-    
-    return MODELS["gatekeeper"]
-
-def detect_skill(text: str) -> tuple[str, str]:
-    """Deterministik skill tespiti; evaluation ve DACE iskeleti için hafif sınıflandırıcı."""
-    t = text.lower()
-    youtube_terms = [
-        "youtube", "video", "senaryo", "script", "hook", "thumbnail",
-        "başlık", "baslik", "açıklama", "aciklama", "etiket", "kanal",
-    ]
-    code_terms = [
-        "kod", "script", "python", "javascript", "hata", "debug",
-        "refactor", "fonksiyon", "class", "api", "pytest", "unit test",
-        "birim test", "optimize",
-        "review", "oyun", "pygame", "uygulama", "proje",
-    ]
-    research_terms = [
-        "araştır", "arastir", "ara", "bul", "güncel", "guncel",
-        "haber", "trend", "ne var", "durum nedir", "son gelişmeler",
-        "son gelismeler",
-    ]
-    if any(term in t for term in youtube_terms):
-        return "youtube_icerik", "skills/youtube_icerik.md"
-    if any(term in t for term in code_terms):
-        return "kod_yardimcisi", "skills/kod_yardimcisi.md"
-    if any(term in t for term in research_terms):
-        return "arastirma", "skills/arastirma.md"
-    return "", ""
 
 def build_security_report() -> str:
     ollama_host = urlparse(OLLAMA_HOST).hostname or ""
@@ -1273,7 +1049,18 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     
+    # DACE Decision: hangi model ve hangi skill baglami?
     model = pick_model(metin)
+    skill_adi, skill_yolu = detect_skill(metin)
+    system_prompt = build_system_prompt(model)
+
+    if skill_yolu:
+        icerik, hata = read_file(skill_yolu, scope=skill_scope(skill_yolu))
+        if icerik:
+            system_prompt += f"\n\nKanal/proje baglami ({skill_adi}):\n{icerik[:2000]}"
+            logger.info(f"🧭 Skill baglami eklendi: {skill_adi}")
+        else:
+            logger.info(f"🧭 Skill tespit edildi ama okunamadi: {skill_adi} ({hata})")
 
     async def notify_tool_use() -> None:
         await update.message.reply_text("⚡ [OpenClaw] Ajan dis dunyadan veri cekiyor...")
@@ -1282,7 +1069,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         yanit = await run_model_with_tools(
             model,
             metin,
-            build_system_prompt(model),
+            system_prompt,
             on_tool_use=notify_tool_use,
         )
 

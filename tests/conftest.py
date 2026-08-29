@@ -25,8 +25,11 @@ def vasi_module(tmp_path, monkeypatch):
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
 
-    if "vasi" in sys.modules:
-        del sys.modules["vasi"]
+    # DACE katmanlari da temizlenmeli: vasi.py bunlardan import ediyor,
+    # onbellekte kalan bir katman eski ortam degiskenlerini tasir.
+    for modul in ("vasi", "access", "context", "execution"):
+        if modul in sys.modules:
+            del sys.modules[modul]
     module = importlib.import_module("vasi")
 
     module.USER_RATE_LIMITS.clear()

@@ -22,6 +22,8 @@ COPY tests ./tests
 COPY pytest.ini .
 COPY access.py .
 COPY context.py .
+COPY execution.py .
+COPY decision.py .
 
 # Security: Non-root user oluştur
 RUN useradd -m -u 1000 vasi && chown -R vasi:vasi /app
