@@ -22,8 +22,9 @@ def test_is_safe_url_blocks_non_http(vasi_module):
 
 
 def test_web_allowlist_blocks_unknown_domain(vasi_module, monkeypatch):
-    monkeypatch.setattr(vasi_module, "WEB_RADAR_ALLOWLIST", ("openai.com",))
-    monkeypatch.setattr(vasi_module, "is_public_hostname", lambda _: True)
+    # DACE: bu isimler artik access.py'de; patch oraya uygulanmali
+    monkeypatch.setattr(vasi_module.access, "WEB_RADAR_ALLOWLIST", ("openai.com",))
+    monkeypatch.setattr(vasi_module.access, "is_public_hostname", lambda _: True)
     assert not vasi_module.is_safe_url("https://example.com/blog")
     assert vasi_module.is_safe_url("https://openai.com/research")
 
