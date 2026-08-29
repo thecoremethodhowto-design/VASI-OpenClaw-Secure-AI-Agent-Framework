@@ -96,7 +96,6 @@ yapılandırma değerlerinden okunur.
 
 Şeffaflık adına, bilinen boşluklar açıkça listelenir:
 
-- `is_authorized()` fonksiyonunun birim testi yoktur
 - `audit_event()` fonksiyonunun doğrudan birim testi yoktur
 - Kırmızı takım (red team) değerlendirmesi yapılmamıştır; testler
   kontrollerin yazıldığı gibi çalıştığını doğrular, kararlı bir

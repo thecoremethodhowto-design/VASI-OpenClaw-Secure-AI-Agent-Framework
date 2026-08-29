@@ -56,6 +56,13 @@ VASI'nin temel guvenlik prensibi: model onerir, kritik islemler kullanici onayi 
 - Veri siniflandirmasi: dis aktarim tum siniflar icin varsayilan olarak kapalidir.
 - `.env` Git ve Docker build baglamindan dislanir.
 
+VASI, DACE mimarisiyle dort katmana ayrilmistir: `decision.py` (ne
+yapilmali), `access.py` (izin var mi), `context.py` (model neyi
+bilmeli), `execution.py` (simdi yap). Katmanlar arasi bagimlilik yonu
+tek taraflidir ve `tests/test_architecture.py` tarafindan dogrulanir —
+hicbir katman `vasi.py`'yi import edemez, her dosya islemi Access
+katmanindan gecer.
+
 > Her kontrolun koddaki tam karsiligi, testleri ve **bilinen eksikleri** icin: [THREAT-MAPPING.md](THREAT-MAPPING.md)
 
 ## Kurulum
@@ -174,7 +181,11 @@ Not: `down --volumes` compose volume verilerini de siler.
 
 ```text
 .
-├── vasi.py
+├── vasi.py                  # Telegram + orkestrasyon
+├── decision.py              # DACE: ne yapilmali?
+├── access.py                # DACE: izin var mi?
+├── context.py               # DACE: model neyi bilmeli?
+├── execution.py             # DACE: simdi yap
 ├── observability.py
 ├── Dockerfile
 ├── docker-compose.yml
@@ -190,6 +201,8 @@ Not: `down --volumes` compose volume verilerini de siler.
 │   └── eval_runner.py
 ├── tests/
 │   ├── conftest.py
+│   ├── test_architecture.py     # DACE katman sinirlari
+│   ├── test_authorization.py    # is_authorized() dort katman
 │   ├── test_security_core.py
 │   ├── test_observability.py
 │   └── test_degisiklikler.py

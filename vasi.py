@@ -478,8 +478,8 @@ def build_security_report() -> str:
 2. Audit satırlarını ayrı dosya veya merkezi log sistemine yönlendir.
 3. Oran/limit ayarlarını `.env` üzerinden tamamen yönetilebilir yap.
 4. Onay akışını tek mekanizmada birleştir: `/rapor` ayrı bir `pending_save` deseni kullanıyor, diğer komutlar `pending_action` kullanıyor.
-5. DACE Gateway: Karar, erişim, bağlam ve çalıştırma katmanlarını `vasi.py` içinden ayır.
-
+5. `run_model_with_tools()` Execution katmanına taşınmalı; bunun için `OBSERVABILITY` singleton'ı `observability.py`'ye taşınmalı.
+6. LiteLLM: Ollama, Gemini ve diğer sağlayıcıları tek bir gateway üzerinden yönet.
 ## Not
 Bu rapor model tarafından tahmin edilmez; mevcut kod sabitlerinden ve güvenlik ayarlarından üretilir.
 Yukarıdaki iyileştirme listesi elle güncellenir.

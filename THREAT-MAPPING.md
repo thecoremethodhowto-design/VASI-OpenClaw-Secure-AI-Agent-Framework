@@ -20,11 +20,29 @@ bağlar.
 | 4 | Fidye Yazılımları | Erişim yüzeyi en küçük olsun | `safe_path()`, uzantı sınırı | ✅ |
 | 5 | Botnetler | Dış temas doğrulansın, iz bıraksın | `is_safe_url()`, `audit_event()` | ◐ |
 | 6 | Tedarik Zinciri | İsimle değil, parmak iziyle sabitle | Digest pinning, hash locking | ⚙️ |
-| 7 | Sosyal Mühendislik | Kimlik çok katmanlı doğrulansın | `is_authorized()` | ❌ |
+| 7 | Sosyal Mühendislik | Kimlik çok katmanlı doğrulansın | `is_authorized()` | ✅ |
 | 8 | Zehirli Üçgen | Emin değilsen "hayır" | Veri sınıflandırma | ✅ |
 
 **Test durumu:** ✅ birim testi var · ◐ kısmen · ⚙️ yapılandırma (birim
-testi uygun değil) · ❌ **test yok**
+testi uygun değil) · ❌ test yok
+
+---
+
+## Mimari: DACE Katmanları
+
+Kontroller dört katmana ayrılmıştır. İzin verilen bağımlılık yönü tek
+taraflıdır; `tests/test_architecture.py` bunu doğrular.
+
+```
+decision.py    Ne yapılmalı?          (bağımsız)
+access.py      İzin var mı?           (bağımsız)
+context.py     Model neyi bilmeli?    (bağımsız)
+execution.py   Şimdi yap              (yalnızca access'e bağımlı)
+vasi.py        Telegram + orkestrasyon
+```
+
+Hiçbir katman `vasi.py`'yi import etmez. Her dosya işlemi Access
+katmanından geçer — bu da bir iddia değil, test edilen bir garantidir.
 
 ---
 
@@ -85,7 +103,7 @@ olanları engelle" değil — "izinli olanları say."
 kalır. İzinlileri listelerseniz, aklınıza gelmeyen her şey kapalı kalır.
 
 **Uygulama**
-- `vasi.py` → `ALLOWED_TOOL_NAMES` — izinli araç kümesi (2 girdi)
+- `access.py` → `ALLOWED_TOOL_NAMES` — izinli araç kümesi (2 girdi)
 - `vasi.py` → `run_model_with_tools()` içindeki whitelist kontrolü
 
 **Tasarım notu:** Liste dışı bir çağrı reddedilir ama **sessizce
@@ -106,11 +124,11 @@ olmayan işlemler ayrıca sınırlanmalı.
 alanını küçültmek, hasarı küçültmektir.
 
 **Uygulama — üç katman**
-1. `vasi.py` → `safe_path()` — `resolve()` sonra `is_relative_to()`
+1. `access.py` → `safe_path()` — `resolve()` sonra `is_relative_to()`
    ile workspace dışına çıkış engeli
-2. `vasi.py` → `ALLOWED_WRITE_EXTENSIONS` + `is_allowed_write_file()` —
+2. `access.py` → `ALLOWED_WRITE_EXTENSIONS` + `is_allowed_write_file()` —
    yazılabilir dosya türü sınırı
-3. `vasi.py` → `delete_file()` — klasör ve gizli dosya silme yasağı
+3. `execution.py` → `delete_file()` — klasör ve gizli dosya silme yasağı
 
 **Tasarım notu:** Sıralama önemli. Doğrulamadan **önce** çözümleme
 yapılır; tersi durumda sembolik bağlantılar ve göreli yollar kontrolü
@@ -134,10 +152,10 @@ atlatabilir.
 sistem sessiz kalamaz.
 
 **Uygulama**
-- `vasi.py` → `is_public_hostname()` — SSRF koruması, iç ağ adresleri
+- `access.py` → `is_public_hostname()` — SSRF koruması, iç ağ adresleri
   reddedilir
-- `vasi.py` → `is_safe_url()` — protokol ve allowlist kontrolü
-- `vasi.py` → `skill_web_radar()` içinde `allow_redirects=False`
+- `access.py` → `is_safe_url()` — protokol ve allowlist kontrolü
+- `execution.py` → `skill_web_radar()` içinde `allow_redirects=False`
 - `vasi.py` → `audit_event()` — güvenlik olayları kaydı
 - `observability.py` → `mask_user_id()` — kayıtlarda kimlik maskeleme
 
@@ -196,7 +214,7 @@ hash uyuşmazlığında başarısız olur.
 **Neden:** Tek bir sinyali taklit etmek kolaydır. Dördünü birden
 taklit etmek çok daha zordur.
 
-**Uygulama** — `vasi.py` → `is_authorized()`, dört kontrol:
+**Uygulama** — `access.py` → `is_authorized()`, dört kontrol:
 1. **Kim** — `MY_TELEGRAM_ID` eşleşmesi
 2. **Nereden** — sadece özel sohbet (`chat.type != "private"` reddedilir)
 3. **Nasıl** — yönlendirilmiş mesaj reddedilir (`forward_origin`)
@@ -206,14 +224,22 @@ taklit etmek çok daha zordur.
 karşıdır. Meşru, doğru imzalanmış bir komut yakalanıp sonradan tekrar
 gönderilse bile çalışmaz.
 
-**Test:** ❌ **Bu kontrolün birim testi yok.**
+**Test:** `tests/test_authorization.py` — 17 test
 
-Bu bilinen bir eksiktir ve burada açıkça belirtilmiştir. `is_authorized()`
-bir `Update` nesnesi aldığı için test edilmesi diğerlerinden daha zahmetli
-(mock gerekiyor), ama imkânsız değil. Katkıya açık.
+Dört kontrolün her biri için hem kabul hem ret senaryosu test edilir:
+- Kimlik: `test_farkli_kullanici_reddedilir`
+- Sohbet türü: `test_ozel_olmayan_sohbetler_reddedilir` (group/supergroup/channel)
+- Yönlendirme: `test_yonlendirilmis_mesaj_reddedilir`
+- Zaman: `test_sinir_altindaki_mesaj_kabul_edilir` (59 sn),
+  `test_sinir_ustundeki_mesaj_reddedilir` (61 sn)
 
-> Not: Test edilmemiş bir kontrol bozuk değildir — **korumasızdır.**
-> İleride bir refactor davranışını değiştirirse hiçbir şey uyarmaz.
+Ayrıca iki kenar durum: mesajsız güncellemeler (callback query) ve
+boş `MY_TELEGRAM_ID` davranışı.
+
+> Bu kontrol uzun süre test edilmemişti. DACE refactor'üne başlamadan
+> önce testleri yazıldı — çünkü test edilmemiş bir kontrol bozuk
+> değildir, **korumasızdır**: bir refactor davranışını sessizce
+> değiştirebilir.
 
 ---
 
@@ -230,9 +256,9 @@ bu üçünün kesiştiği noktada açık bir politika olmalı, ve varsayılanı
 **Uygulama**
 - `policies/data_classification.yaml` — dört sınıf: PUBLIC, PRIVATE,
   PROJECT, SECRET
-- `vasi.py` → `classify_file()` — desen tabanlı sınıflandırma
-- `vasi.py` → `is_gemini_allowed()` — dış aktarım izni sorgusu
-- `vasi.py` → `classification_report_line()` — okunabilir rapor satırı
+- `access.py` → `classify_file()` — desen tabanlı sınıflandırma
+- `access.py` → `is_gemini_allowed()` — dış aktarım izni sorgusu
+- `access.py` → `classification_report_line()` — okunabilir rapor satırı
 - `vasi.py` → `cmd_siniflandir()` — `/siniflandir <dosya>` komutu
 
 **Tasarım notu — dikkat:** `PUBLIC` sınıfında bile
@@ -262,7 +288,7 @@ politika dosyası okunamazsa ya da sınıf tanımsızsa cevap "hayır" olur.
 docker compose run --rm vasi-core python -m pytest
 ```
 
-Beklenen: 46 test geçer.
+Beklenen: 78 test geçer.
 
 ---
 
@@ -271,8 +297,10 @@ Beklenen: 46 test geçer.
 Bu belge, kontrollerin **iddia edildiği gibi çalıştığını** göstermeyi
 amaçlar. Aşağıdakiler bilinen boşluklardır:
 
-1. `is_authorized()` — birim testi yok (Kontrol 7)
-2. `audit_event()` — doğrudan birim testi yok (Kontrol 5)
+1. `audit_event()` — doğrudan birim testi yok (Kontrol 5)
+2. `run_model_with_tools()` henüz `vasi.py`'de; Execution katmanına
+   taşınması `OBSERVABILITY` singleton'ının yeniden konumlandırılmasını
+   gerektiriyor
 3. Kırmızı takım değerlendirmesi yapılmadı — testler kontrollerin
    yazıldığı gibi çalıştığını doğrular, kararlı bir saldırgana karşı
    yeterli olduğunu değil
