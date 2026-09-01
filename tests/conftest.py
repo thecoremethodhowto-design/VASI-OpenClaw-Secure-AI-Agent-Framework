@@ -27,7 +27,7 @@ def vasi_module(tmp_path, monkeypatch):
 
     # DACE katmanlari da temizlenmeli: vasi.py bunlardan import ediyor,
     # onbellekte kalan bir katman eski ortam degiskenlerini tasir.
-    for modul in ("vasi", "access", "context", "execution"):
+    for modul in ("vasi", "decision", "access", "context", "execution"):
         if modul in sys.modules:
             del sys.modules[modul]
     module = importlib.import_module("vasi")
