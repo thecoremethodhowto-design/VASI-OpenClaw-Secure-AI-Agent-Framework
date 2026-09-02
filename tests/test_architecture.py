@@ -151,3 +151,31 @@ def test_message_handler_skill_baglamini_kullaniyor():
     kaynak = inspect.getsource(vasi.message_handler)
     assert "detect_skill(" in kaynak, "message_handler detect_skill kullanmiyor"
     assert "skill_scope(" in kaynak, "skill okumasi kapsam belirtmiyor"
+
+
+# ── Test izolasyonu ──────────────────────────────────────────────────────────
+
+def test_tum_katmanlar_ayni_workspace_i_goruyor(vasi_module, tmp_path):
+    """Katmanlar onbellekten gelen ESKI bir workspace tasimamali.
+
+    Bu test, conftest'in modul temizligi eksik kalirsa kirilir:
+    onbellekte kalan bir katman onceki testin tmp_path'ini tasir.
+    """
+    beklenen = (tmp_path / "workspace").resolve()
+    assert vasi_module.access.WORKSPACE == beklenen
+    assert vasi_module.execution.WORKSPACE == beklenen
+    assert vasi_module.WORKSPACE == beklenen
+
+
+def test_kok_dizindeki_her_modul_temizleniyor():
+    """conftest elle tutulan bir liste degil, dinamik tarama kullanmali.
+
+    Elle tutulan liste, yeni bir katman eklendiginde geride kalir.
+    Bu tam olarak bir kez yasandi: decision.py eklendiginde liste
+    guncellenmedi ve hicbir test bunu yakalamadi.
+    """
+    kaynak = (REPO / "tests" / "conftest.py").read_text(encoding="utf-8")
+    assert "glob(" in kaynak, (
+        "conftest kok dizini taramiyor; yeni bir katman eklendiginde "
+        "temizlik disinda kalir"
+    )
