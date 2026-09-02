@@ -240,7 +240,9 @@ def test_yerel_modeller_ollama_kullaniyor():
         if not ad.startswith("yerel-"):
             continue
         model = girdi["litellm_params"]["model"]
-        assert model.startswith("ollama/"), (
+        # ollama_chat/ tercih edilir: dogal arac cagrisi destekler.
+        # ollama/ da yereldir ama araclari prompt'a metin olarak enjekte eder.
+        assert model.startswith(("ollama/", "ollama_chat/")), (
             f"'{ad}' yerel olarak isaretlenmis ama '{model}' kullaniyor"
         )
 

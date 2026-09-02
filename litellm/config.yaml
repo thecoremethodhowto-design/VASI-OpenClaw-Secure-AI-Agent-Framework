@@ -21,12 +21,12 @@ model_list:
 
   - model_name: yerel-genel
     litellm_params:
-      model: ollama/qwen3:30b
+      model: ollama_chat/qwen3:30b
       api_base: os.environ/OLLAMA_HOST
 
   - model_name: yerel-kod
     litellm_params:
-      model: ollama/qwen3-coder:30b
+      model: ollama_chat/qwen3-coder:30b
       api_base: os.environ/OLLAMA_HOST
 
   # ── DIŞ MODELLER ────────────────────────────────────────────────────────────

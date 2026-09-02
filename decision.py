@@ -24,14 +24,38 @@ MODELS = {
 }
 
 
+# LiteLLM acikken model adi yerine takma ad kullanilir. Eslesme burada
+# durur cunku "hangi model" bir Decision sorusudur; takma adin gecerli
+# olup olmadigini Access dogrular.
+LITELLM_ALIASES = {
+    "gatekeeper": "yerel-genel",
+    "strateji":   "yerel-genel",
+    "teknik":     "yerel-genel",
+    "kod":        "yerel-kod",
+    "gorsel":     "yerel-genel",
+}
+
+_USE_LITELLM = os.getenv("USE_LITELLM", "false").strip().lower() in ("1", "true", "yes")
+
+
+def model_for_role(role: str) -> str:
+    """Bir rol icin kullanilacak model tanimlayicisini dondurur.
+
+    LiteLLM acikken takma ad, kapaliyken dogrudan Ollama model adi.
+    """
+    if _USE_LITELLM:
+        return LITELLM_ALIASES.get(role, "yerel-genel")
+    return MODELS[role]
+
+
 def pick_model(text: str) -> str:
     t = text.lower()
-    if any(k in t for k in ["kod", "script", "python"]): return MODELS["kod"]
-    if any(k in t for k in ["analiz", "gorsel", "tablo"]): return MODELS["gorsel"]
-    if any(k in t for k in ["arastir", "neden", "web", "site", "okut"]): return MODELS["teknik"]
-    if any(k in t for k in ["e-posta", "rapor", "taslak"]): return MODELS["strateji"]
-    
-    return MODELS["gatekeeper"]
+    if any(k in t for k in ["kod", "script", "python"]): return model_for_role("kod")
+    if any(k in t for k in ["analiz", "gorsel", "tablo"]): return model_for_role("gorsel")
+    if any(k in t for k in ["arastir", "neden", "web", "site", "okut"]): return model_for_role("teknik")
+    if any(k in t for k in ["e-posta", "rapor", "taslak"]): return model_for_role("strateji")
+
+    return model_for_role("gatekeeper")
 
 
 # ── SKILL TESPITI ─────────────────────────────────────────────

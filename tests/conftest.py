@@ -15,6 +15,11 @@ def vasi_module(tmp_path, monkeypatch):
     monkeypatch.setenv("MY_TELEGRAM_ID", "123456")
     monkeypatch.setenv("WORKSPACE_DIR", str(workspace))
     monkeypatch.setenv("OLLAMA_HOST", "http://localhost:11434")
+    # Testler .env'den BAGIMSIZ olmali. USE_LITELLM acikken calistirilan
+    # bir test, gercek proxy'ye istek atmaya calisir ve ortama gore
+    # farkli sonuc verir. LiteLLM yolunu test etmek isteyen testler
+    # modul niteligini monkeypatch ile acar.
+    monkeypatch.setenv("USE_LITELLM", "false")
     monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.setenv("PENDING_ACTION_TTL_SECONDS", "30")

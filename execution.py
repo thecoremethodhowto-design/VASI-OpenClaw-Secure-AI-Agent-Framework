@@ -8,6 +8,7 @@ Bu katman access.py uzerinden gecmeden dosya sistemine dokunmaz.
 Her yol scoped_path() ile dogrulanir, her yazma is_allowed_write_file()
 ile kontrol edilir.
 """
+import json
 import logging
 import os
 import time
@@ -271,6 +272,100 @@ logger_setup_msg = (
 _ollama_headers = {"X-API-Key": OLLAMA_API_KEY} if OLLAMA_API_KEY else None
 ollama_client = Client(host=OLLAMA_HOST, headers=_ollama_headers)
 
+# ── LITELLM PROXY ─────────────────────────────────────────────
+# Gecis bayragi. Varsayilan KAPALI: bayrak acilmadikca davranis
+# degismez. Canli ortamda sorun cikarsa .env'de false yapip
+# eski yola donebilirsin.
+USE_LITELLM = os.getenv("USE_LITELLM", "false").strip().lower() in ("1", "true", "yes")
+LITELLM_BASE_URL = os.getenv("LITELLM_BASE_URL", "http://litellm:4000")
+LITELLM_MASTER_KEY = os.getenv("LITELLM_MASTER_KEY", "")
+MODEL_TIMEOUT = int(os.getenv("MODEL_TIMEOUT_SECONDS", "180"))
+
+
+class ChatBackendError(Exception):
+    """Model cagirma hatasi. Iki backend'in hatalarini tek tipe indirger."""
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _chat_ollama(model: str, messages: list, tools=None, options=None) -> dict:
+    """Ollama'ya dogrudan cagri. Mesaj sozlugunu dondurur."""
+    try:
+        resp = ollama_client.chat(
+            model=model, messages=messages, tools=tools, options=options
+        )
+    except ResponseError as e:
+        raise ChatBackendError(
+            getattr(e, "error", str(e)), status_code=getattr(e, "status_code", None)
+        ) from e
+    except Exception as e:
+        raise ChatBackendError(str(e)) from e
+    return resp["message"]
+
+
+def _chat_litellm(model: str, messages: list, tools=None, options=None) -> dict:
+    """LiteLLM proxy'sine OpenAI uyumlu cagri. Mesaj sozlugunu dondurur."""
+    payload: dict = {"model": model, "messages": messages}
+    if tools:
+        payload["tools"] = tools
+    if options:
+        payload.update(options)
+
+    try:
+        r = requests.post(
+            f"{LITELLM_BASE_URL}/v1/chat/completions",
+            headers={"Authorization": f"Bearer {LITELLM_MASTER_KEY}"},
+            json=payload,
+            timeout=MODEL_TIMEOUT,
+        )
+    except requests.RequestException as e:
+        raise ChatBackendError(f"LiteLLM'e ulasilamadi: {e}") from e
+
+    if r.status_code >= 400:
+        raise ChatBackendError(r.text[:300], status_code=r.status_code)
+
+    try:
+        return r.json()["choices"][0]["message"]
+    except (KeyError, IndexError, ValueError) as e:
+        raise ChatBackendError(f"Beklenmeyen yanit yapisi: {e}") from e
+
+
+def _chat(model: str, messages: list, tools=None, options=None) -> dict:
+    """Aktif backend'e gore sohbet cagrisi yapar."""
+    backend = _chat_litellm if USE_LITELLM else _chat_ollama
+    return backend(model, messages, tools=tools, options=options)
+
+
+def _normalize_tool_calls(message: dict) -> list[dict]:
+    """Iki API'nin arac cagri formatini tek tipe indirger.
+
+    Ollama: arguments bir sozluk.
+    OpenAI: arguments bir JSON metni, ayrica tool_call_id tasir.
+    """
+    normalize = []
+    for cagri in message.get("tool_calls") or []:
+        fn = cagri.get("function", {}) or {}
+        args = fn.get("arguments") or {}
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                args = {}
+        normalize.append(
+            {"id": cagri.get("id"), "name": fn.get("name", ""), "arguments": args}
+        )
+    return normalize
+
+
+def _tool_result_message(cagri: dict, sonuc: str) -> dict:
+    """Arac sonucunu her iki API'nin de kabul ettigi bicimde paketler."""
+    mesaj = {"role": "tool", "content": sonuc, "name": cagri["name"]}
+    if cagri.get("id"):
+        mesaj["tool_call_id"] = cagri["id"]
+    return mesaj
+
 
 OPENCLAW_TOOLS = [
     {
@@ -303,82 +398,74 @@ async def run_model_with_tools(
     options: dict | None = None,
     on_tool_use: Callable[[], Awaitable[None]] | None = None,
 ) -> str:
-    """Ollama modelini guvenli tool whitelist'i ile calistirir.
+    """Modeli guvenli tool whitelist'i ile calistirir.
+
+    Aktif backend USE_LITELLM bayragina gore secilir; bu fonksiyon
+    ikisini de ayni sekilde gorur (bkz. _chat ve _normalize_tool_calls).
 
     on_tool_use: Model bir arac cagirdiginda, arac calistirilmadan once
     beklenen async bildirim. Kullanici deneyimi icin opsiyoneldir.
     """
     started = time.perf_counter()
-    messages = []
+
+    def _gecen_ms() -> int:
+        return int((time.perf_counter() - started) * 1000)
+
+    def _hata_metni(e: ChatBackendError) -> str:
+        if e.status_code == 404:
+            return (
+                f"Model bulunamadı: {model}\n\n"
+                f"LiteLLM kullaniyorsan litellm/config.yaml'da tanimli mi kontrol et.\n"
+                f"Dogrudan Ollama kullaniyorsan once indir:\n"
+                f"docker compose exec ollama ollama pull {model}"
+            )
+        return f"Model hatası: {e}"
+
+    messages: list = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": user_prompt})
 
     try:
-        response = ollama_client.chat(model=model, messages=messages, tools=OPENCLAW_TOOLS, options=options)
-    except ResponseError as e:
-        if getattr(e, "status_code", None) == 404:
-            return (
-                f"Model bulunamadı: {model}\n\n"
-                f"Önce şu komutla modeli indir:\n"
-                f"docker compose exec ollama ollama pull {model}"
-            )
-        logger.error(f"❌ Ollama model hatası: {e}", exc_info=True)
-        OBSERVABILITY.record_model_call(model, int((time.perf_counter() - started) * 1000), ok=False, error=str(e))
-        return f"Model hatası: {getattr(e, 'error', str(e))}"
-    except Exception as e:
-        logger.error(f"❌ Ollama çağrı hatası: {e}", exc_info=True)
-        OBSERVABILITY.record_model_call(model, int((time.perf_counter() - started) * 1000), ok=False, error=str(e))
-        return f"Model çalıştırma hatası: {e}"
+        message_data = _chat(model, messages, tools=OPENCLAW_TOOLS, options=options)
+    except ChatBackendError as e:
+        logger.error(f"❌ Model çağrı hatası: {e}", exc_info=True)
+        OBSERVABILITY.record_model_call(model, _gecen_ms(), ok=False, error=str(e))
+        return _hata_metni(e)
 
-    message_data = response["message"]
+    tool_calls = _normalize_tool_calls(message_data)
 
-    if message_data.get("tool_calls"):
-        if on_tool_use:
-            await on_tool_use()
-        messages.append(message_data)
-        for tool in message_data["tool_calls"]:
-            func_name = tool["function"]["name"]
-            args = tool["function"].get("arguments") or {}
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except json.JSONDecodeError:
-                    args = {}
+    if not tool_calls:
+        OBSERVABILITY.record_model_call(model, _gecen_ms(), ok=True)
+        return message_data.get("content", "") or ""
 
-            if func_name not in ALLOWED_TOOL_NAMES:
-                logger.warning(f"🚫 Yetkisiz tool çağrısı: {func_name}")
-                tool_result = "Güvenlik: Bu araç kullanımı yasaktır."
-            elif func_name == "skill_get_time":
-                tool_result = skill_get_time()
-            elif func_name == "skill_web_radar":
-                tool_result = skill_web_radar(args.get("url", ""))
-            else:
-                tool_result = "Bilinmeyen arac."
+    if on_tool_use:
+        await on_tool_use()
 
-            messages.append({"role": "tool", "content": tool_result, "name": func_name})
+    messages.append(message_data)
 
-        try:
-            final_response = ollama_client.chat(model=model, messages=messages, options=options)
-        except ResponseError as e:
-            if getattr(e, "status_code", None) == 404:
-                return (
-                    f"Model bulunamadı: {model}\n\n"
-                    f"Önce şu komutla modeli indir:\n"
-                    f"docker compose exec ollama ollama pull {model}"
-                )
-            logger.error(f"❌ Ollama final yanıt hatası: {e}", exc_info=True)
-            OBSERVABILITY.record_model_call(model, int((time.perf_counter() - started) * 1000), ok=False, error=str(e))
-            return f"Model hatası: {getattr(e, 'error', str(e))}"
-        except Exception as e:
-            logger.error(f"❌ Ollama final çağrı hatası: {e}", exc_info=True)
-            OBSERVABILITY.record_model_call(model, int((time.perf_counter() - started) * 1000), ok=False, error=str(e))
-            return f"Model çalıştırma hatası: {e}"
+    for cagri in tool_calls:
+        ad = cagri["name"]
+        args = cagri["arguments"]
 
-        result = final_response["message"].get("content", "")
-        OBSERVABILITY.record_model_call(model, int((time.perf_counter() - started) * 1000), ok=True)
-        return result
+        if ad not in ALLOWED_TOOL_NAMES:
+            logger.warning(f"🚫 Yetkisiz tool çağrısı: {ad}")
+            sonuc = "Güvenlik: Bu araç kullanımı yasaktır."
+        elif ad == "skill_get_time":
+            sonuc = skill_get_time()
+        elif ad == "skill_web_radar":
+            sonuc = skill_web_radar(args.get("url", ""))
+        else:
+            sonuc = "Bilinmeyen arac."
 
-    result = message_data.get("content", "")
-    OBSERVABILITY.record_model_call(model, int((time.perf_counter() - started) * 1000), ok=True)
-    return result
+        messages.append(_tool_result_message(cagri, sonuc))
+
+    try:
+        final_message = _chat(model, messages, options=options)
+    except ChatBackendError as e:
+        logger.error(f"❌ Model final çağrı hatası: {e}", exc_info=True)
+        OBSERVABILITY.record_model_call(model, _gecen_ms(), ok=False, error=str(e))
+        return _hata_metni(e)
+
+    OBSERVABILITY.record_model_call(model, _gecen_ms(), ok=True)
+    return final_message.get("content", "") or ""
