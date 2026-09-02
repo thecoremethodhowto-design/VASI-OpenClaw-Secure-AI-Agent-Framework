@@ -25,11 +25,18 @@ def vasi_module(tmp_path, monkeypatch):
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
 
-    # DACE katmanlari da temizlenmeli: vasi.py bunlardan import ediyor,
-    # onbellekte kalan bir katman eski ortam degiskenlerini tasir.
-    for modul in ("vasi", "access", "context", "execution"):
+    # Depo kokundeki TUM yerel modulleri bellekten temizle.
+    #
+    # Neden elle liste tutmuyoruz: bu liste bir kez elle yazildi ve
+    # decision.py eklendiginde guncellenmeyi unuttu. Onbellekte kalan
+    # bir modul, eski ortam degiskenlerini sonraki testlere tasir ve
+    # bunu hicbir test yakalamaz. Kok dizini taramak, yeni bir katman
+    # eklendiginde kendiliginde kapsar.
+    for py_dosya in repo_root.glob("*.py"):
+        modul = py_dosya.stem
         if modul in sys.modules:
             del sys.modules[modul]
+
     module = importlib.import_module("vasi")
 
     module.USER_RATE_LIMITS.clear()
