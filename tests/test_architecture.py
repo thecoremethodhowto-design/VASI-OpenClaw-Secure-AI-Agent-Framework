@@ -144,11 +144,10 @@ def test_bilinen_skiller_dogru_kapsamda():
     assert decision.skill_scope("skills/arastirma.md") == "youtube"
 
 
-def test_message_handler_skill_baglamini_kullaniyor():
+def test_message_handler_skill_baglamini_kullaniyor(vasi_module):
     """detect_skill artik gercekten bagli; olu kod degil."""
     import inspect
-    import vasi
-    kaynak = inspect.getsource(vasi.message_handler)
+    kaynak = inspect.getsource(vasi_module.message_handler)
     assert "detect_skill(" in kaynak, "message_handler detect_skill kullanmiyor"
     assert "skill_scope(" in kaynak, "skill okumasi kapsam belirtmiyor"
 
@@ -179,3 +178,66 @@ def test_kok_dizindeki_her_modul_temizleniyor():
         "conftest kok dizini taramiyor; yeni bir katman eklendiginde "
         "temizlik disinda kalir"
     )
+
+# ── Model gizlilik profili ───────────────────────────────────────────────────
+
+def test_litellm_takma_adlari_onek_kuralina_uyuyor():
+    """config.yaml'daki her takma ad yerel- veya dis- ile baslamali.
+
+    Bu kural olmadan, bir modelin verinin makineden cikip cikmadigi
+    koddan anlasilamaz. Yeni bir model eklerken onek unutulursa
+    bu test kirilir.
+    """
+    import yaml
+    import decision
+
+    config_yolu = REPO / "litellm" / "config.yaml"
+    if not config_yolu.exists():
+        pytest.skip("litellm/config.yaml yok")
+
+    config = yaml.safe_load(config_yolu.read_text(encoding="utf-8"))
+    takma_adlar = [m["model_name"] for m in config.get("model_list", [])]
+
+    assert takma_adlar, "config.yaml'da hic model tanimli degil"
+
+    kuralsiz = [
+        ad for ad in takma_adlar
+        if decision.privacy_profile(ad) == "bilinmiyor"
+    ]
+    assert not kuralsiz, (
+        f"Su takma adlar onek kuralina uymuyor: {kuralsiz}. "
+        f"Her ad '{decision.YEREL_ONEK}' veya '{decision.DIS_ONEK}' "
+        f"ile baslamali."
+    )
+
+
+def test_yerel_modeller_ollama_kullaniyor():
+    """yerel- onekli bir model gercekten yerelde calismali.
+
+    Onek bir iddiadir; bu test onu dogrular. yerel- diye
+    isimlendirilmis ama buluta giden bir model, isimlendirme
+    kuralini anlamsizlastirirdi.
+    """
+    import yaml
+
+    config_yolu = REPO / "litellm" / "config.yaml"
+    if not config_yolu.exists():
+        pytest.skip("litellm/config.yaml yok")
+
+    config = yaml.safe_load(config_yolu.read_text(encoding="utf-8"))
+    for girdi in config.get("model_list", []):
+        ad = girdi["model_name"]
+        if not ad.startswith("yerel-"):
+            continue
+        model = girdi["litellm_params"]["model"]
+        assert model.startswith("ollama/"), (
+            f"'{ad}' yerel olarak isaretlenmis ama '{model}' kullaniyor"
+        )
+
+
+def test_bilinmeyen_takma_ad_yerel_sayilmiyor():
+    """Guvenli varsayilan: kurala uymayan ad asla yerel degildir."""
+    import decision
+    for ad in ["claude-analiz", "gpt4", "", "yerelsiz"]:
+        assert not decision.is_local(ad), f"'{ad}' yerel sayilmamali"
+        assert decision.leaves_machine(ad), f"'{ad}' icin veri cikiyor sayilmali"
