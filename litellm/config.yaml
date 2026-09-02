@@ -1,0 +1,56 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# LiteLLM Yapılandırması — VASİ
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# TASARIM İLKESİ: Takma ad, verinin nereye gittiğini söyler.
+#
+#   yerel-*  → Model bu makinede çalışır. Hiçbir veri dışarı çıkmaz.
+#   dis-*    → Model bir sağlayıcıda çalışır. Veri makineden ayrılır.
+#
+# Bu ayrım bir yorum satırı değil, zorlanabilir bir kuraldır:
+# decision.py takma adın önekine bakar, access.py politikayı uygular.
+#
+# Yeni bir model eklerken önek kuralına uy. Uymayan bir takma ad,
+# mimari testte yakalanır.
+# ══════════════════════════════════════════════════════════════════════════════
+
+model_list:
+
+  # ── YEREL MODELLER ──────────────────────────────────────────────────────────
+  # Ollama üzerinde çalışır. İstek makineden çıkmaz.
+
+  - model_name: yerel-genel
+    litellm_params:
+      model: ollama/qwen3:30b
+      api_base: os.environ/OLLAMA_HOST
+
+  - model_name: yerel-kod
+    litellm_params:
+      model: ollama/qwen3-coder:30b
+      api_base: os.environ/OLLAMA_HOST
+
+  # ── DIŞ MODELLER ────────────────────────────────────────────────────────────
+  # Veri sağlayıcıya gider. Sadece PUBLIC sınıfı içerikle kullanılmalı.
+
+  - model_name: dis-arastirma
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: os.environ/GEMINI_API_KEY
+
+  - model_name: dis-analiz
+    litellm_params:
+      model: anthropic/claude-sonnet-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+
+general_settings:
+  # Proxy yalnızca vasi-network içinden erişilebilir (compose'da port
+  # yayınlanmıyor). Master key yine de zorunlu — derinlemesine savunma.
+  master_key: os.environ/LITELLM_MASTER_KEY
+
+
+litellm_settings:
+  # İstekleri ve yanıtları diske yazma. VASİ'nin kendi audit izi var;
+  # ikinci bir kopya gereksiz saldırı yüzeyi.
+  set_verbose: false
+  drop_params: true

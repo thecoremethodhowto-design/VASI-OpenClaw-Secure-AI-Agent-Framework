@@ -27,6 +27,39 @@ services:
     #           count: 1
     #           capabilities: [gpu]
 
+  litellm:
+    # ⚠️ DIGEST'İ KENDİN DOLDUR:
+    #   docker pull ghcr.io/berriai/litellm:v1.98.0
+    #   docker inspect --format='{{index .RepoDigests 0}}' ghcr.io/berriai/litellm:v1.98.0
+    #
+    # NEDEN 1.99.0 DEGIL: 1.99.0 bir gun once yayinlandi. LiteLLM
+    # Mart 2026'da tedarik zinciri saldirisina ugradi (1.82.7 / 1.82.8).
+    # Yeni surumu hemen almak, o riski tekrarlamak olur. 1.98.0 on
+    # gunluk ve toplulukca incelenmis durumda.
+    image: ghcr.io/berriai/litellm@sha256:20b5044b619055374061a6d5b7b08754cad75aeabbf82ddf4f69cc0cf80ddaf4
+    container_name: vasi-litellm
+    # Port YAYINLANMIYOR: proxy yalnizca vasi-network icinden erisilebilir.
+    expose:
+      - "4000"
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    environment:
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+    restart: unless-stopped
+    networks:
+      - vasi-network
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+
   vasi-core:
     build: .
     container_name: vasi-sandbox-guard
@@ -36,6 +69,8 @@ services:
     environment:
       # Varsayilan: Mac/host uzerinde zaten calisan Ollama'yi kullan.
       OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      LITELLM_BASE_URL: ${LITELLM_BASE_URL:-http://litellm:4000}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
       VASI_LOG_FILE: /tmp/vasi_audit.log
       VASI_NOTES_FILE: notlar/NOTES.md
       VASI_CHANNEL_STYLE_FILE: skills/youtube_icerik.md
