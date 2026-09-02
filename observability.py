@@ -232,3 +232,13 @@ def skills_health(workspace: Path) -> HealthCheck:
     if result.status == "ok" and result.details == "skill bulunamadı":
         return HealthCheck(result.component, "warn", result.latency_ms, result.details)
     return result
+
+# ── PAYLASILAN ORNEK ──────────────────────────────────────────────────────────
+# Singleton burada tanimlanir ki hem vasi.py hem execution.py ayni ornegi
+# kullanabilsin. vasi.py'de tanimlansaydi, execution.py onu import etmek
+# icin vasi.py'yi import etmek zorunda kalir ve dairesel bagimlilik olusurdu.
+#
+# logging.getLogger() ayni ismi her cagrida ayni nesneyi dondurur; bu
+# yuzden burada erken alinmasi, vasi.py'deki basicConfig() yapilandirmasini
+# kacirmaz.
+OBSERVABILITY = ObservabilityStore(logging.getLogger("vasi"))

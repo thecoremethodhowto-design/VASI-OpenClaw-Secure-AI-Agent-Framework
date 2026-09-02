@@ -55,11 +55,21 @@ def test_context_hicbir_yerel_module_bagimli_degil():
 
 # ── Yon kontrolu ─────────────────────────────────────────────────────────────
 
+# observability bir DACE katmani DEGILDIR: logging gibi enine kesen bir
+# kaygidir ve her katman ondan yararlanabilir. Katman sirasi kurallarinin
+# disinda tutulur.
+ENINE_KESEN = {"observability"}
+
+
 def test_execution_sadece_access_e_bagimli():
-    """Execution yalnizca Access'i kullanabilir, vasi'yi kullanamaz."""
+    """Execution yalnizca Access'i kullanabilir, vasi'yi kullanamaz.
+
+    observability haric tutulur; o bir katman degil, kayit rayidir.
+    """
     bagimliliklar = modul_importlari("execution.py") & YEREL_MODULLER
-    assert bagimliliklar <= {"access"}, (
-        f"execution.py izin verilmeyen bagimlilik iceriyor: {bagimliliklar - {'access'}}"
+    izinli = {"access"} | ENINE_KESEN
+    assert bagimliliklar <= izinli, (
+        f"execution.py izin verilmeyen bagimlilik iceriyor: {bagimliliklar - izinli}"
     )
 
 

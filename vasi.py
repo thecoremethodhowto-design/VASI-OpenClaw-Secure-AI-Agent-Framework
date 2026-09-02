@@ -23,6 +23,7 @@ from telegram.ext import (
     filters, ContextTypes, CallbackQueryHandler
 )
 from observability import (
+    OBSERVABILITY,
     HealthCheck,
     ObservabilityStore,
     format_health_report,
@@ -83,13 +84,18 @@ from context import (
 # ── EXECUTION KATMANI (DACE) ──────────────────────────────────────────────────
 import execution
 from execution import (
+    LOCAL_OLLAMA_HOSTS,
+    logger_setup_msg,
     MAX_FILE_SIZE,
     MAX_WEB_BYTES,
     MAX_WEB_TIMEOUT,
+    OPENCLAW_TOOLS,
     append_file,
     delete_file,
     list_workspace_files,
+    ollama_client,
     read_file,
+    run_model_with_tools,
     save_file,
     skill_get_time,
     skill_web_radar,
@@ -124,22 +130,6 @@ if not MY_TELEGRAM_ID:
 if not WORKSPACE.exists():
     raise ValueError(f"❌ WORKSPACE_DIR mevcut değil: {WORKSPACE}")
 
-# ── OLLAMA CLIENT SETUP (API KEY SECURITY) ────────────────────────────────────
-# Ollama bağlantısını API key ile güvenli hale getir
-ollama_headers = {}
-if OLLAMA_API_KEY:
-    ollama_headers["X-API-Key"] = OLLAMA_API_KEY
-    logger_setup_msg = f"✅ Ollama API Key ile güvenli bağlantı"
-else:
-    logger_setup_msg = f"⚠️ Ollama API Key ayarlanmamış (localhost ortamında güvenli)"
-
-LOCAL_OLLAMA_HOSTS = {"localhost", "127.0.0.1", "::1", "host.docker.internal", "ollama"}
-parsed_ollama_host = urlparse(OLLAMA_HOST)
-ollama_hostname = parsed_ollama_host.hostname or ""
-if not OLLAMA_API_KEY and ollama_hostname not in LOCAL_OLLAMA_HOSTS:
-    raise ValueError("❌ Uzak Ollama sunucusu için OLLAMA_API_KEY zorunludur!")
-
-ollama_client = Client(host=OLLAMA_HOST, headers=ollama_headers if ollama_headers else None)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 # ── LOGGING SETUP ────────────────────────────────────────────────────────────
@@ -155,7 +145,6 @@ logger = logging.getLogger('vasi')
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext").setLevel(logging.INFO)
-OBSERVABILITY = ObservabilityStore(logger)
 
 # Log Ollama setup durumunu başta
 logger.debug(logger_setup_msg)
@@ -299,115 +288,7 @@ def gemini_grounded_summary(topic: str) -> str:
         logger.error(f"❌ Gemini kısa özet hatası: {e}", exc_info=True)
         return "Hata: Gemini kısa özet üretilemedi."
 
-async def run_model_with_tools(
-    model: str,
-    user_prompt: str,
-    system_prompt: str | None = None,
-    options: dict | None = None,
-    on_tool_use: Callable[[], Awaitable[None]] | None = None,
-) -> str:
-    """Ollama modelini guvenli tool whitelist'i ile calistirir.
 
-    on_tool_use: Model bir arac cagirdiginda, arac calistirilmadan once
-    beklenen async bildirim. Kullanici deneyimi icin opsiyoneldir.
-    """
-    started = time.perf_counter()
-    messages = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": user_prompt})
-
-    try:
-        response = ollama_client.chat(model=model, messages=messages, tools=OPENCLAW_TOOLS, options=options)
-    except ResponseError as e:
-        if getattr(e, "status_code", None) == 404:
-            return (
-                f"Model bulunamadı: {model}\n\n"
-                f"Önce şu komutla modeli indir:\n"
-                f"docker compose exec ollama ollama pull {model}"
-            )
-        logger.error(f"❌ Ollama model hatası: {e}", exc_info=True)
-        OBSERVABILITY.record_model_call(model, int((time.perf_counter() - started) * 1000), ok=False, error=str(e))
-        return f"Model hatası: {getattr(e, 'error', str(e))}"
-    except Exception as e:
-        logger.error(f"❌ Ollama çağrı hatası: {e}", exc_info=True)
-        OBSERVABILITY.record_model_call(model, int((time.perf_counter() - started) * 1000), ok=False, error=str(e))
-        return f"Model çalıştırma hatası: {e}"
-
-    message_data = response["message"]
-
-    if message_data.get("tool_calls"):
-        if on_tool_use:
-            await on_tool_use()
-        messages.append(message_data)
-        for tool in message_data["tool_calls"]:
-            func_name = tool["function"]["name"]
-            args = tool["function"].get("arguments") or {}
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except json.JSONDecodeError:
-                    args = {}
-
-            if func_name not in ALLOWED_TOOL_NAMES:
-                logger.warning(f"🚫 Yetkisiz tool çağrısı: {func_name}")
-                tool_result = "Güvenlik: Bu araç kullanımı yasaktır."
-            elif func_name == "skill_get_time":
-                tool_result = skill_get_time()
-            elif func_name == "skill_web_radar":
-                tool_result = skill_web_radar(args.get("url", ""))
-            else:
-                tool_result = "Bilinmeyen arac."
-
-            messages.append({"role": "tool", "content": tool_result, "name": func_name})
-
-        try:
-            final_response = ollama_client.chat(model=model, messages=messages, options=options)
-        except ResponseError as e:
-            if getattr(e, "status_code", None) == 404:
-                return (
-                    f"Model bulunamadı: {model}\n\n"
-                    f"Önce şu komutla modeli indir:\n"
-                    f"docker compose exec ollama ollama pull {model}"
-                )
-            logger.error(f"❌ Ollama final yanıt hatası: {e}", exc_info=True)
-            OBSERVABILITY.record_model_call(model, int((time.perf_counter() - started) * 1000), ok=False, error=str(e))
-            return f"Model hatası: {getattr(e, 'error', str(e))}"
-        except Exception as e:
-            logger.error(f"❌ Ollama final çağrı hatası: {e}", exc_info=True)
-            OBSERVABILITY.record_model_call(model, int((time.perf_counter() - started) * 1000), ok=False, error=str(e))
-            return f"Model çalıştırma hatası: {e}"
-
-        result = final_response["message"].get("content", "")
-        OBSERVABILITY.record_model_call(model, int((time.perf_counter() - started) * 1000), ok=True)
-        return result
-
-    result = message_data.get("content", "")
-    OBSERVABILITY.record_model_call(model, int((time.perf_counter() - started) * 1000), ok=True)
-    return result
-
-OPENCLAW_TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "skill_get_time",
-            "description": "Sistemin guncel tarih ve saatini verir.",
-            "parameters": {"type": "object", "properties": {}}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "skill_web_radar",
-            "description": "Bir web sitesinin (URL) metin icerigini okur. Arastirma yapmak icin zorunludur.",
-            "parameters": {
-                "type": "object",
-                "properties": {"url": {"type": "string", "description": "Tam web adresi (http://...)"}},
-                "required": ["url"]
-            }
-        }
-    }
-]
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 3. DOSYA İŞLEMLERİ (KAPALI DEVRE)
