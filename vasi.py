@@ -106,6 +106,7 @@ from execution import (
 import decision
 from decision import (
     MODELS,
+    model_for_role,
     detect_skill,
     pick_model,
     skill_scope,
@@ -516,7 +517,7 @@ async def cmd_fikir(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "YouTube/uygulama açısından olası kullanım, ilk 3 aksiyon.\n\n"
         f"Fikir: {fikir}"
     )
-    sonuc = await run_model_with_tools(MODELS["teknik"], prompt, build_system_prompt(MODELS["teknik"]))
+    sonuc = await run_model_with_tools(model_for_role("teknik"), prompt, build_system_prompt(model_for_role("teknik")))
     preview, keyboard = set_pending(
         context,
         "append",
@@ -625,7 +626,7 @@ async def cmd_ara_senaryo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Araştırma notları:\n{arastirma[:9000]}\n\n"
         f"Konu:\n{konu}"
     )
-    sonuc = await run_model_with_tools(MODELS["strateji"], prompt, build_system_prompt(MODELS["strateji"]))
+    sonuc = await run_model_with_tools(model_for_role("strateji"), prompt, build_system_prompt(model_for_role("strateji")))
     out_name = f"youtube/senaryolar/ara_senaryo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
     preview, keyboard = set_pending(
         context,
@@ -682,7 +683,7 @@ async def cmd_senaryo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Kanal tarzı:\n{kanal_tarzi[:6000]}\n\n"
         f"Video konusu:\n{konu}"
     )
-    sonuc = await run_model_with_tools(MODELS["strateji"], prompt, build_system_prompt(MODELS["strateji"]))
+    sonuc = await run_model_with_tools(model_for_role("strateji"), prompt, build_system_prompt(model_for_role("strateji")))
     out_name = f"youtube/senaryolar/senaryo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
     preview, keyboard = set_pending(
         context,
@@ -725,9 +726,9 @@ async def cmd_kod(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Soru:\n{soru}"
     )
     sonuc = await run_model_with_tools(
-        MODELS["kod"],
+        model_for_role("kod"),
         prompt,
-        build_code_system_prompt(MODELS["kod"]),
+        build_code_system_prompt(model_for_role("kod")),
         options={"temperature": 0.1, "top_p": 0.4},
     )
     for i in range(0, len(sonuc), 3900):
@@ -755,9 +756,9 @@ async def cmd_kod_patch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"İstek:\n{istek}"
     )
     sonuc = await run_model_with_tools(
-        MODELS["kod"],
+        model_for_role("kod"),
         prompt,
-        build_code_system_prompt(MODELS["kod"]),
+        build_code_system_prompt(model_for_role("kod")),
         options={"temperature": 0.1, "top_p": 0.4},
     )
     for i in range(0, len(sonuc), 3900):
@@ -834,9 +835,9 @@ async def cmd_rapor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
         sonuc = await run_model_with_tools(
-            MODELS["strateji"],
+            model_for_role("strateji"),
             f"Detayli rapor yaz: {konu}",
-            build_system_prompt(MODELS["strateji"]),
+            build_system_prompt(model_for_role("strateji")),
         )
         out_name = f"notlar/rapor_{datetime.now().strftime('%H%M')}.md"
         context.user_data["pending_save"] = {

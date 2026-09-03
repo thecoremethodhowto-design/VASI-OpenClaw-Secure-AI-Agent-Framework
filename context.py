@@ -7,6 +7,7 @@ Bu katmandaki fonksiyonlar saf fonksiyonlardir: girdi alir, metin
 dondurur, kalici yan etkileri yoktur.
 """
 import logging
+from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger("vasi")
@@ -104,15 +105,29 @@ def build_code_context() -> str:
 # ── SISTEM PROMPTLARI ─────────────────────────────────────────
 
 def build_system_prompt(model: str) -> str:
+    # Modelin egitim verisi eski oldugu icin kendini gecmiste sanabilir.
+    # Tarih verilmezse "2023 guncel" varsayimiyla eskimis bilgiyi
+    # bugunun bilgisi gibi sunar -- uydurma degil, zaman korlugu.
+    bugun = datetime.now().strftime("%d.%m.%Y")
     return (
-        f"Sen Vasi. {model} motoruyla calisiyorsun. Turkce yanit ver. "
+        f"Sen Vasi. {model} motoruyla calisiyorsun. "
+        f"BUGUNUN TARIHI: {bugun}. Egitim verin bu tarihten cok daha eski. "
+        "Guncel sandigin bilgiler eskimis olabilir; yil belirtirken dikkatli ol. "
+        "Bir konunun son durumunu bilmiyorsan bunu SOYLE, tahmin etme. "
+        "Turkce yanit ver. "
         "Yüksek sinyalli, net, profesyonel ve muhendislik olcutlerine uygun konus. "
-        "Eger internetten veya gercek zamanli bir bilgi alman gerekirse yeteneklerini (tools) kullan."
+        "Kullanici BELIRLI bir sayfa adresi verdiyse skill_web_radar ile okuyabilirsin. "
+        "Ama guncel bilgi/arastirma isteniyor ve elinde adres YOKSA arac cagirma; "
+        "bunun yerine kullaniciya /ara komutunu kullanmasini oner. "
+        "Erisemedigin bir kaynaktan rakam veya iddia UYDURMA; bilmiyorsan bilmedigini soyle."
     )
 
 def build_code_system_prompt(model: str) -> str:
+    bugun = datetime.now().strftime("%d.%m.%Y")
     return (
         f"Sen Vasi'nin kod yardımı modusun. {model} motoruyla çalışıyorsun. "
+        f"BUGUNUN TARIHI: {bugun}. Kutuphane surumleri ve API'ler egitim "
+        "verinden bu yana degismis olabilir; emin olmadigin surum bilgisi verme. "
         "Türkçe, pratik ve proje bağlamına sadık yanıt ver. Kod inceleme disiplinin katı olsun. "
         "Sadece verilen dosya içeriklerine dayan; bilmediğin şeyi biliyor gibi yazma. "
         "Komut önerirken yıkıcı komutlar önerme. Gizli anahtar, token veya .env içeriği isteme. "

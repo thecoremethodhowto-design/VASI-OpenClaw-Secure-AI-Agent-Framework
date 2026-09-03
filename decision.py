@@ -14,6 +14,10 @@ Bu bilgiyle NE YAPILACAGINA Access katmani karar verir.
 """
 import os
 
+# Gizlilik profili Access katmanindadir: "bu model yerel mi?" bir erisim
+# sorusudur, karar sorusu degil. Decision burada yalnizca tuketicidir.
+from access import DIS_ONEK, YEREL_ONEK, is_local, leaves_machine, privacy_profile
+
 # ── MODEL SECIMI ─────────────────────────────────────────────────────────────
 MODELS = {
     "gatekeeper": os.getenv("VASI_MODEL_GATEKEEPER", "llama3.1:8b"),
@@ -106,48 +110,3 @@ def skill_scope(skill_path: str) -> str:
     return SKILL_SCOPES.get(skill_path, "general")
 
 # ── MODEL GIZLILIK PROFILI ────────────────────────────────────
-
-# litellm/config.yaml icindeki takma adlar bu iki onekten birini
-# kullanmak ZORUNDADIR. Kural tests/test_architecture.py tarafindan
-# dogrulanir; uymayan bir takma ad testte yakalanir.
-YEREL_ONEK = "yerel-"
-DIS_ONEK = "dis-"
-
-
-def privacy_profile(model_alias: str) -> str:
-    """Bir model takma adinin gizlilik profilini dondurur.
-
-    Donen degerler:
-        "yerel"    - Model bu makinede calisir, veri disari cikmaz.
-        "dis"      - Model bir saglayicida calisir, veri makineden ayrilir.
-        "bilinmiyor" - Takma ad kurala uymuyor.
-
-    "bilinmiyor" bilincli olarak "dis" degil: cagiran taraf bunu
-    ayirt edebilmeli. Ancak guvenli varsayilan icin is_local()
-    kullanin; o, bilinmeyen bir adi asla yerel saymaz.
-    """
-    if model_alias.startswith(YEREL_ONEK):
-        return "yerel"
-    if model_alias.startswith(DIS_ONEK):
-        return "dis"
-    return "bilinmiyor"
-
-
-def is_local(model_alias: str) -> bool:
-    """Bu model bu makinede mi calisiyor?
-
-    Guvenli varsayilan: yalnizca ACIKCA yerel olarak isaretlenmis
-    takma adlar True doner. Bilinmeyen bir ad yerel SAYILMAZ --
-    boylece yanlis isimlendirilmis bir model, veri sizdirma
-    kontrolunu sessizce atlayamaz.
-    """
-    return privacy_profile(model_alias) == "yerel"
-
-
-def leaves_machine(model_alias: str) -> bool:
-    """Bu modele gonderilen veri makineden cikar mi?
-
-    is_local()'in tersi degildir: bilinmeyen bir takma ad icin de
-    True doner. Emin olunmayan durumda "veri cikiyor" kabul edilir.
-    """
-    return not is_local(model_alias)

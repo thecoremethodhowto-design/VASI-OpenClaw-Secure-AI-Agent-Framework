@@ -278,3 +278,113 @@ def is_safe_url(url: str) -> bool:
     except Exception as e:
         logger.error(f"URL doğrulama hatası: {e}")
         return False
+
+# ── MODEL GIZLILIK PROFILI ──────────────────────────────────────
+
+# litellm/config.yaml icindeki takma adlar bu iki onekten birini
+# kullanmak ZORUNDADIR. Kural tests/test_architecture.py tarafindan
+# dogrulanir; uymayan bir takma ad testte yakalanir.
+YEREL_ONEK = "yerel-"
+DIS_ONEK = "dis-"
+
+
+def privacy_profile(model_alias: str) -> str:
+    """Bir model takma adinin gizlilik profilini dondurur.
+
+    Donen degerler:
+        "yerel"    - Model bu makinede calisir, veri disari cikmaz.
+        "dis"      - Model bir saglayicida calisir, veri makineden ayrilir.
+        "bilinmiyor" - Takma ad kurala uymuyor.
+
+    "bilinmiyor" bilincli olarak "dis" degil: cagiran taraf bunu
+    ayirt edebilmeli. Ancak guvenli varsayilan icin is_local()
+    kullanin; o, bilinmeyen bir adi asla yerel saymaz.
+    """
+    if model_alias.startswith(YEREL_ONEK):
+        return "yerel"
+    if model_alias.startswith(DIS_ONEK):
+        return "dis"
+    return "bilinmiyor"
+
+
+def is_local(model_alias: str) -> bool:
+    """Bu model bu makinede mi calisiyor?
+
+    Guvenli varsayilan: yalnizca ACIKCA yerel olarak isaretlenmis
+    takma adlar True doner. Bilinmeyen bir ad yerel SAYILMAZ --
+    boylece yanlis isimlendirilmis bir model, veri sizdirma
+    kontrolunu sessizce atlayamaz.
+    """
+    return privacy_profile(model_alias) == "yerel"
+
+
+def leaves_machine(model_alias: str) -> bool:
+    """Bu modele gonderilen veri makineden cikar mi?
+
+    is_local()'in tersi degildir: bilinmeyen bir takma ad icin de
+    True doner. Emin olunmayan durumda "veri cikiyor" kabul edilir.
+    """
+    return not is_local(model_alias)
+
+
+# ── MODEL POLITIKA KAPISI ───────────────────────────────────────
+
+def assert_model_allowed(
+    model_alias: str,
+    filepaths: list[str] | None = None,
+) -> str | None:
+    """Bu icerik bu modele gonderilebilir mi?
+
+    Donen deger:
+        None  - izin var
+        str   - engellendi, kullaniciya gosterilecek mesaj
+
+    Kural: veri makineden cikacaksa, gonderilecek her dosyanin
+    disari aktarima izinli olmasi gerekir. Yerel modellerde
+    kontrol yapilmaz cunku veri zaten makineden ayrilmaz.
+    """
+    if is_local(model_alias):
+        return None
+
+    if privacy_profile(model_alias) == "bilinmiyor":
+        logger.warning(f"🚫 Tanimsiz model takma adi: {model_alias}")
+        return (
+            f"Güvenlik: '{model_alias}' tanımlı bir model değil. "
+            f"Takma adlar 'yerel-' veya 'dis-' ile başlamalıdır."
+        )
+
+    for yol in filepaths or []:
+        if not is_gemini_allowed(yol):
+            sinif = classify_file(yol)
+            logger.warning(
+                f"🚫 Dis model engellendi: {model_alias} <- {yol} ({sinif})"
+            )
+            return (
+                f"Güvenlik: '{yol}' dosyası {sinif} sınıfında ve dış "
+                f"servislere aktarılamaz. Bu istek için yerel bir model kullanın."
+            )
+
+    return None
+
+# ── ARAMA MOTORU TESPITI ────────────────────────────────────────
+
+# Arama motoru sonuc sayfalari kazinamaz: bot isteklerine JavaScript'e
+# bagimli bir kabuk ya da onay sayfasi donerler. Model bu neredeyse bos
+# icerigi "arastirma yaptim" sanip kaynaksiz iddialar uretebilir.
+# Bu, sessiz basarisizligin en tehlikeli turudur.
+SEARCH_ENGINE_HOSTS = {
+    "bing.com", "duckduckgo.com", "search.yahoo.com", "baidu.com",
+    "search.brave.com", "ecosia.org", "startpage.com", "qwant.com",
+    "yandex.com", "yandex.com.tr", "yandex.ru",
+}
+
+
+def is_search_engine(url: str) -> bool:
+    """Bu adres bir arama motoru sonuc sayfasi mi?"""
+    host = (urlparse(url).hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    # google.com, google.com.tr, google.de ... hepsi
+    if host == "google" or host.startswith("google."):
+        return True
+    return host in SEARCH_ENGINE_HOSTS

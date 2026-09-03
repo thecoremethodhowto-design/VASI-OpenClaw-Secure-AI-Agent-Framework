@@ -8,14 +8,16 @@ Bu katman access.py uzerinden gecmeden dosya sistemine dokunmaz.
 Her yol scoped_path() ile dogrulanir, her yazma is_allowed_write_file()
 ile kontrol edilir.
 """
+import html
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Awaitable, Callable
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -23,6 +25,7 @@ from ollama import Client, ResponseError
 
 from access import (
     ALLOWED_TOOL_NAMES,
+    is_search_engine,
     WORKSPACE,
     is_allowed_write_file,
     is_safe_url,
@@ -43,26 +46,76 @@ MAX_WEB_BYTES = 2 * 1024 * 1024  # 2MB
 def skill_get_time() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-def skill_web_radar(url: str) -> str:
-    """Güvenli web scraping - SSRF ve XSS korumalı."""
-    if not is_safe_url(url):
-        logger.warning(f"🚫 Güvensiz URL reddedildi: {url}")
-        return "Hata: Güvensiz veya geçersiz URL."
-    
-    try:
-        headers = {"User-Agent": "Mozilla/5.0 (compatible; Vasi-Bot/1.0)"}
+# Yonlendirme takibi kac adim surebilir.
+# requests'in otomatik takibini KULLANMIYORUZ: o, ara adimlari
+# dogrulamadan izler ve izinli bir adresten ic aga yonlendirme
+# yapilmasina acik kalir. Burada her adim yeniden dogrulanir.
+MAX_REDIRECT_HOPS = 3
+
+
+def _fetch_with_verified_redirects(url: str, headers: dict):
+    """Yonlendirmeleri ELLE takip eder, her adimda SSRF kontrolu yapar.
+
+    Donen deger: (response, son_url) veya (None, hata_mesaji)
+
+    Bu, allow_redirects=True'dan daha guvenlidir: requests otomatik
+    takip ederken yalnizca ilk URL dogrulanmis olur; ara adimlar
+    kontrol disi kalir. Burada her adres, izlenmeden once
+    is_safe_url()'den gecer.
+    """
+    mevcut = url
+    for adim in range(MAX_REDIRECT_HOPS + 1):
         response = requests.get(
-            url,
+            mevcut,
             headers=headers,
             timeout=MAX_WEB_TIMEOUT,
             allow_redirects=False,
             stream=True,
         )
-        response.raise_for_status()
 
-        if 300 <= response.status_code < 400:
-            logger.warning(f"🚫 Redirect engellendi: {url} -> {response.headers.get('Location')}")
-            return "Hata: Yonlendirme guvenlik nedeniyle engellendi."
+        if not (300 <= response.status_code < 400):
+            response.raise_for_status()
+            return response, mevcut
+
+        hedef = response.headers.get("Location")
+        if not hedef:
+            logger.warning(f"🚫 Location basligi olmayan yonlendirme: {mevcut}")
+            return None, "Hata: Gecersiz yonlendirme."
+
+        # Goreli yolu mutlak hale getir (ornek: /artificial-intelligence)
+        yeni_url = urljoin(mevcut, hedef)
+
+        # KRITIK: her adim yeniden dogrulanir.
+        if not is_safe_url(yeni_url):
+            logger.warning(f"🚫 Guvensiz yonlendirme engellendi: {mevcut} -> {yeni_url}")
+            return None, "Hata: Yonlendirme guvenli olmayan bir adrese gidiyor."
+
+        logger.info(f"↪️ Yonlendirme takip edildi ({adim + 1}): {mevcut} -> {yeni_url}")
+        mevcut = yeni_url
+
+    logger.warning(f"🚫 Yonlendirme siniri asildi: {url}")
+    return None, "Hata: Cok fazla yonlendirme."
+
+
+def skill_web_radar(url: str) -> str:
+    """Güvenli web scraping - SSRF ve XSS korumalı."""
+    if not is_safe_url(url):
+        logger.warning(f"🚫 Güvensiz URL reddedildi: {url}")
+        return "Hata: Güvensiz veya geçersiz URL."
+
+    if is_search_engine(url):
+        logger.warning(f"🚫 Arama motoru reddedildi: {url}")
+        return (
+            "Hata: Arama motoru sonuc sayfalari okunamaz. "
+            "Bu arac belirli bir makale veya belge adresi icindir. "
+            "Guncel arastirma icin kullaniciya /ara komutunu oner."
+        )
+
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; Vasi-Bot/1.0)"}
+        response, sonuc = _fetch_with_verified_redirects(url, headers)
+        if response is None:
+            return sonuc
 
         content_type = response.headers.get("Content-Type", "")
         if content_type and "text/html" not in content_type and "text/plain" not in content_type:
@@ -338,6 +391,39 @@ def _chat(model: str, messages: list, tools=None, options=None) -> dict:
     return backend(model, messages, tools=tools, options=options)
 
 
+# Bazi modeller (ozellikle Qwen ailesi) arac cagrisini yapisal alan
+# yerine metin icinde <tool_call>{...}</tool_call> olarak uretir.
+# Bu, proxy uzerinden gecerken mesaj gecmisinin tam korunamadigi
+# durumlarda olusur. Yapisal alan bossa metne de bakariz.
+_TOOL_CALL_TAG = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+
+
+def _tool_calls_from_text(content: str) -> list[dict]:
+    """Metne gomulmus arac cagrilarini ayristirir."""
+    bulunan = []
+    for eslesme in _TOOL_CALL_TAG.finditer(content or ""):
+        try:
+            veri = json.loads(eslesme.group(1))
+        except json.JSONDecodeError:
+            continue
+        ad = veri.get("name")
+        if not ad:
+            continue
+        args = veri.get("arguments") or {}
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                args = {}
+        bulunan.append({"id": None, "name": ad, "arguments": args})
+    return bulunan
+
+
+def _strip_tool_call_tags(content: str) -> str:
+    """Kullaniciya gosterilecek metinden arac cagrisi etiketlerini temizler."""
+    return _TOOL_CALL_TAG.sub("", content or "").strip()
+
+
 def _normalize_tool_calls(message: dict) -> list[dict]:
     """Iki API'nin arac cagri formatini tek tipe indirger.
 
@@ -356,6 +442,11 @@ def _normalize_tool_calls(message: dict) -> list[dict]:
         normalize.append(
             {"id": cagri.get("id"), "name": fn.get("name", ""), "arguments": args}
         )
+
+    # Yapisal alan bossa metne bak.
+    if not normalize:
+        normalize = _tool_calls_from_text(message.get("content", ""))
+
     return normalize
 
 
@@ -380,7 +471,10 @@ OPENCLAW_TOOLS = [
         "type": "function",
         "function": {
             "name": "skill_web_radar",
-            "description": "Bir web sitesinin (URL) metin icerigini okur. Arastirma yapmak icin zorunludur.",
+            "description": ("BELIRLI bir web sayfasinin metin icerigini okur. "
+                               "Arama motoru DEGILDIR: google/bing gibi sorgu adresleri reddedilir. "
+                               "Yalnizca kullanicinin verdigi ya da onceki bir kaynakta gecen "
+                               "tam bir sayfa adresi ile kullan. Adres yoksa bu araci CAGIRMA."),
             "parameters": {
                 "type": "object",
                 "properties": {"url": {"type": "string", "description": "Tam web adresi (http://...)"}},
@@ -389,6 +483,12 @@ OPENCLAW_TOOLS = [
         }
     }
 ]
+
+
+# Model araclari cagirdiktan sonra kac tur daha devam edebilir.
+# Sinir olmadan model kendini tekrar edebilir; cok dusuk olursa
+# birden fazla arac gerektiren istekler yarim kalir.
+MAX_TOOL_ROUNDS = 3
 
 
 async def run_model_with_tools(
@@ -403,10 +503,15 @@ async def run_model_with_tools(
     Aktif backend USE_LITELLM bayragina gore secilir; bu fonksiyon
     ikisini de ayni sekilde gorur (bkz. _chat ve _normalize_tool_calls).
 
-    on_tool_use: Model bir arac cagirdiginda, arac calistirilmadan once
-    beklenen async bildirim. Kullanici deneyimi icin opsiyoneldir.
+    ONEMLI: tools parametresi HER turda gonderilir. Gonderilmezse model
+    gecmiste arac cagrisi sozdizimi gorur ama elinde arac tanimi olmaz;
+    bu durumda deseni metin olarak taklit eder ve <tool_call>...</tool_call>
+    seklinde ham cikti uretir.
+
+    on_tool_use: Model ilk kez arac cagirdiginda beklenen async bildirim.
     """
     started = time.perf_counter()
+    bildirildi = False
 
     def _gecen_ms() -> int:
         return int((time.perf_counter() - started) * 1000)
@@ -421,51 +526,56 @@ async def run_model_with_tools(
             )
         return f"Model hatası: {e}"
 
+    def _basarili(icerik: str) -> str:
+        OBSERVABILITY.record_model_call(model, _gecen_ms(), ok=True)
+        return _strip_tool_call_tags(icerik)
+
+    def _basarisiz(e: ChatBackendError) -> str:
+        logger.error(f"❌ Model çağrı hatası: {e}", exc_info=True)
+        OBSERVABILITY.record_model_call(model, _gecen_ms(), ok=False, error=str(e))
+        return _hata_metni(e)
+
     messages: list = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": user_prompt})
 
+    for tur in range(MAX_TOOL_ROUNDS):
+        try:
+            message_data = _chat(model, messages, tools=OPENCLAW_TOOLS, options=options)
+        except ChatBackendError as e:
+            return _basarisiz(e)
+
+        tool_calls = _normalize_tool_calls(message_data)
+        if not tool_calls:
+            return _basarili(message_data.get("content", ""))
+
+        if on_tool_use and not bildirildi:
+            await on_tool_use()
+            bildirildi = True
+
+        messages.append(message_data)
+
+        for cagri in tool_calls:
+            ad = cagri["name"]
+            args = cagri["arguments"]
+
+            if ad not in ALLOWED_TOOL_NAMES:
+                logger.warning(f"🚫 Yetkisiz tool çağrısı: {ad}")
+                sonuc = "Güvenlik: Bu araç kullanımı yasaktır."
+            elif ad == "skill_get_time":
+                sonuc = skill_get_time()
+            elif ad == "skill_web_radar":
+                sonuc = skill_web_radar(args.get("url", ""))
+            else:
+                sonuc = "Bilinmeyen arac."
+
+            messages.append(_tool_result_message(cagri, sonuc))
+
+    # Tur siniri asildi: araclarsiz son bir cagri ile metin cevap iste.
+    logger.warning(f"⚠️ Arac turu siniri asildi ({MAX_TOOL_ROUNDS}): {model}")
     try:
-        message_data = _chat(model, messages, tools=OPENCLAW_TOOLS, options=options)
+        son = _chat(model, messages, options=options)
     except ChatBackendError as e:
-        logger.error(f"❌ Model çağrı hatası: {e}", exc_info=True)
-        OBSERVABILITY.record_model_call(model, _gecen_ms(), ok=False, error=str(e))
-        return _hata_metni(e)
-
-    tool_calls = _normalize_tool_calls(message_data)
-
-    if not tool_calls:
-        OBSERVABILITY.record_model_call(model, _gecen_ms(), ok=True)
-        return message_data.get("content", "") or ""
-
-    if on_tool_use:
-        await on_tool_use()
-
-    messages.append(message_data)
-
-    for cagri in tool_calls:
-        ad = cagri["name"]
-        args = cagri["arguments"]
-
-        if ad not in ALLOWED_TOOL_NAMES:
-            logger.warning(f"🚫 Yetkisiz tool çağrısı: {ad}")
-            sonuc = "Güvenlik: Bu araç kullanımı yasaktır."
-        elif ad == "skill_get_time":
-            sonuc = skill_get_time()
-        elif ad == "skill_web_radar":
-            sonuc = skill_web_radar(args.get("url", ""))
-        else:
-            sonuc = "Bilinmeyen arac."
-
-        messages.append(_tool_result_message(cagri, sonuc))
-
-    try:
-        final_message = _chat(model, messages, options=options)
-    except ChatBackendError as e:
-        logger.error(f"❌ Model final çağrı hatası: {e}", exc_info=True)
-        OBSERVABILITY.record_model_call(model, _gecen_ms(), ok=False, error=str(e))
-        return _hata_metni(e)
-
-    OBSERVABILITY.record_model_call(model, _gecen_ms(), ok=True)
-    return final_message.get("content", "") or ""
+        return _basarisiz(e)
+    return _basarili(son.get("content", ""))

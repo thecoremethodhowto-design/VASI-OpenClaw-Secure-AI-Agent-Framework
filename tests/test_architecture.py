@@ -134,10 +134,32 @@ def test_katmanlar_beklenen_fonksiyonlari_iceriyor(modul, beklenen):
 
 # ── Decision katmani ─────────────────────────────────────────────────────────
 
-def test_decision_hicbir_yerel_module_bagimli_degil():
-    """Decision saf karar mantigi: yerel bagimliligi olmamali."""
+def test_decision_sadece_access_e_bagimli():
+    """Decision yalnizca Access'i kullanabilir.
+
+    Access en alt katmandir: kendisi bagimsizdir, digerleri ona
+    dayanabilir. Gizlilik profili ("bu model yerel mi?") bir erisim
+    sorusudur; Decision onu Access'ten sorar, kendi tanimlamaz.
+    """
     bagimliliklar = modul_importlari("decision.py") & YEREL_MODULLER
-    assert bagimliliklar == set(), f"decision.py sunlara bagimli: {bagimliliklar}"
+    izinli = {"access"} | ENINE_KESEN
+    assert bagimliliklar <= izinli, (
+        f"decision.py izin verilmeyen bagimlilik iceriyor: {bagimliliklar - izinli}"
+    )
+
+
+def test_access_katmanlar_arasi_yon_dogru():
+    """Access hicbir DACE katmanina bagimli olmamali.
+
+    Ters bagimlilik (access -> decision/context/execution) olursa
+    en alt katman yukaridakilere bagli hale gelir ve kural, kontrol
+    ettigi seyden etkilenmeye baslar.
+    """
+    bagimliliklar = modul_importlari("access.py") & YEREL_MODULLER
+    yasak = {"decision", "context", "execution", "vasi"}
+    assert not (bagimliliklar & yasak), (
+        f"access.py ust katmanlara bagimli: {bagimliliklar & yasak}"
+    )
 
 
 def test_bilinmeyen_skill_en_kisitlayici_kapsama_duser():
