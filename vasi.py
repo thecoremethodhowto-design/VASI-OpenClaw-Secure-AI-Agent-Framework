@@ -71,6 +71,8 @@ from access import (
 import context
 from context import (
     CODE_CONTEXT_FILES,
+    MAX_HISTORY_TURNS,
+    append_turn,
     CODE_REVIEW_GUARDRAILS,
     MAX_CODE_CONTEXT_FILE_SIZE,
     SECRET_KEYS,
@@ -180,6 +182,7 @@ Komutlar:
 /kod_patch <istek> - Uygulanabilir patch taslağı üretir (dosya yazmaz)
 /guvenlik - Mevcut güvenlik kontrollerini deterministik raporlar
 /siniflandir <dosya> - Dosyanın veri sınıfını ve Gemini aktarım iznini gösterir
+/temizle - Konuşma geçmişini sıfırlar
 /saglik - Bileşen sağlık durumunu gösterir
 /istatistik - Komut, hata ve model kullanım özetini gösterir
 /audit_ozet - Son olay ve audit özetini gösterir
@@ -778,6 +781,19 @@ async def cmd_kod_patch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i in range(0, len(sonuc), 3900):
         await update.message.reply_text(sonuc[i:i+3900])
 
+async def cmd_temizle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Konusma gecmisini sifirlar. Konu degistirirken kullanilir."""
+    if not is_authorized(update): return
+
+    tur = len(context.user_data.get("sohbet_gecmisi", [])) // 2
+    context.user_data["sohbet_gecmisi"] = []
+    audit_event("history_cleared", str(update.effective_user.id), f"{tur} tur")
+
+    await update.message.reply_text(
+        f"🧹 Konuşma geçmişi temizlendi ({tur} tur silindi).\n\n"
+        f"Not: Bu yalnızca sohbet bağlamıdır; kalıcı bir kayıt tutulmuyor."
+    )
+
 async def cmd_siniflandir(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Bir dosyanın veri sınıfını ve Gemini aktarım iznini gösterir."""
     if not is_authorized(update): return
@@ -961,15 +977,21 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async def notify_tool_use() -> None:
         await update.message.reply_text("⚡ [OpenClaw] Ajan dis dunyadan veri cekiyor...")
 
+    gecmis = context.user_data.get("sohbet_gecmisi", [])
+
     try:
         yanit = await run_model_with_tools(
             model,
             metin,
             system_prompt,
             on_tool_use=notify_tool_use,
+            history=gecmis,
         )
 
-        logger.info(f"✅ Yanıt hazırlandı: {user_id} (Model: {model})")
+        # Gecmis yalnizca BASARILI bir cevaptan sonra guncellenir.
+        context.user_data["sohbet_gecmisi"] = append_turn(gecmis, metin, yanit)
+
+        logger.info(f"✅ Yanıt hazırlandı: {user_id} (Model: {model}, geçmiş: {len(gecmis)//2} tur)")
         for i in range(0, len(yanit), 4000):
             await update.message.reply_text(f"[{model.upper()}]\n" + yanit[i:i+4000])
 
@@ -1032,6 +1054,7 @@ if __name__ == "__main__":
         app.add_handler(CommandHandler("kod_patch", observed_command("kod_patch", cmd_kod_patch)))
         app.add_handler(CommandHandler("guvenlik", observed_command("guvenlik", cmd_guvenlik)))
         app.add_handler(CommandHandler("siniflandir", observed_command("siniflandir", cmd_siniflandir)))
+        app.add_handler(CommandHandler("temizle", observed_command("temizle", cmd_temizle)))
         app.add_handler(CommandHandler("saglik", observed_command("saglik", cmd_saglik)))
         app.add_handler(CommandHandler("istatistik", observed_command("istatistik", cmd_istatistik)))
         app.add_handler(CommandHandler("audit_ozet", observed_command("audit_ozet", cmd_audit_ozet)))

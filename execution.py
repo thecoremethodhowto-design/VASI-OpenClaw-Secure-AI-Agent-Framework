@@ -497,6 +497,7 @@ async def run_model_with_tools(
     system_prompt: str | None = None,
     options: dict | None = None,
     on_tool_use: Callable[[], Awaitable[None]] | None = None,
+    history: list | None = None,
 ) -> str:
     """Modeli guvenli tool whitelist'i ile calistirir.
 
@@ -538,6 +539,8 @@ async def run_model_with_tools(
     messages: list = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
+    if history:
+        messages.extend(history)
     messages.append({"role": "user", "content": user_prompt})
 
     for tur in range(MAX_TOOL_ROUNDS):

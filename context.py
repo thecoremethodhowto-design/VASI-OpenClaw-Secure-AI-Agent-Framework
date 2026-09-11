@@ -7,6 +7,7 @@ Bu katmandaki fonksiyonlar saf fonksiyonlardir: girdi alir, metin
 dondurur, kalici yan etkileri yoktur.
 """
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -143,3 +144,30 @@ def build_code_system_prompt(model: str) -> str:
         "Her bulgu için koddaki somut kanıtı belirt; kanıt yoksa önerme. "
         "Bulgu yoksa bunu açıkça söyle ve yalnızca düşük öncelikli iyileştirmeleri ayrı bölümde ver."
     )
+
+# ── KONUSMA GECMISI ───────────────────────────────────────────
+
+# Kac tur saklanir. Bir tur = kullanici mesaji + model cevabi.
+# Gecmis buyudukce her cagrida daha cok token gider; sinir sart.
+MAX_HISTORY_TURNS = int(os.getenv("MAX_HISTORY_TURNS", "10"))
+
+
+def trim_history(gecmis: list) -> list:
+    """Son MAX_HISTORY_TURNS turu tutar, oncesini atar."""
+    return gecmis[-(MAX_HISTORY_TURNS * 2):]
+
+
+def append_turn(gecmis: list, kullanici: str, model_cevabi: str) -> list:
+    """Yeni bir turu ekler ve gecmisi budar.
+
+    GUVENLIK: Gecmise yalnizca kullanici mesaji ve modelin NIHAI metin
+    cevabi girer. Arac sonuclari (web icerigi, dosya icerigi) GIRMEZ.
+
+    Neden: bir web sayfasindaki gizli talimat gecmise girerse, sonraki
+    her turda modele tekrar tekrar gonderilir. Tek seferlik bir
+    enjeksiyon, kalici bir enjeksiyona donusur.
+    """
+    yeni = list(gecmis)
+    yeni.append({"role": "user", "content": kullanici})
+    yeni.append({"role": "assistant", "content": model_cevabi})
+    return trim_history(yeni)
