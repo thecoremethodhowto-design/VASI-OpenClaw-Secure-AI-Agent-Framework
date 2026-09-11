@@ -86,6 +86,9 @@ import execution
 from execution import (
     LOCAL_OLLAMA_HOSTS,
     logger_setup_msg,
+    MAX_REDIRECT_HOPS,
+    LITELLM_BASE_URL,
+    USE_LITELLM,
     MAX_FILE_SIZE,
     MAX_WEB_BYTES,
     MAX_WEB_TIMEOUT,
@@ -329,6 +332,11 @@ def build_security_report() -> str:
     ollama_scope = "yerel/izinli" if ollama_host in LOCAL_OLLAMA_HOSTS else "uzak"
     api_key_state = "var" if bool(OLLAMA_API_KEY) else "yok"
     allowlist_state = ", ".join(WEB_RADAR_ALLOWLIST) if WEB_RADAR_ALLOWLIST else "kapalı (public hostlara açık)"
+    litellm_state = (
+        f"LiteLLM proxy aktif ({LITELLM_BASE_URL}); model çağrıları takma adlar üzerinden yönlendirilir."
+        if USE_LITELLM
+        else "Kapalı; model çağrıları doğrudan Ollama'ya gider."
+    )
 
     return f"""# Vasi Güvenlik Durumu
 
@@ -342,13 +350,19 @@ def build_security_report() -> str:
 - Yazma onayı: `/yaz`, `/ekle`, `/sil`, `/fikir`, `/senaryo`, `/ara_senaryo`, `/rapor` işlemleri Telegram onay butonu ister.
 - Scope izolasyonu: `youtube` komutları `youtube/`, `notlar/`, `skills/youtube_icerik.md`, `skills/arastirma.md` alanında; `kod` komutları `projeler/` ve `skills/kod_yardimcisi.md` alanında çalışır.
 - Pending TTL: Onay bekleyen işlemler {PENDING_ACTION_TTL_SECONDS // 60} dakika sonra otomatik geçersiz olur.
-- SSRF koruması: Web aracı sadece `http/https`, public hostname/IP, redirect kapalı ve {MAX_WEB_BYTES // 1024 // 1024}MB yanıt limitiyle çalışır.
+- SSRF koruması: Web aracı sadece `http/https` ve public hostname/IP ile çalışır; {MAX_WEB_BYTES // 1024 // 1024}MB yanıt limiti var.
+- Yönlendirme doğrulaması: Redirect'ler otomatik izlenmez; her adım `is_safe_url()` ile yeniden doğrulanır, en fazla {MAX_REDIRECT_HOPS} adım.
+- Arama motoru engeli: Google/Bing/DuckDuckGo gibi sorgu sayfaları okunamaz; bot isteklerine boş içerik dönerler.
 - Web radar allowlist: {allowlist_state}
 - Gemini araştırması: Sadece `/ara`, `/ara_not`, `/ara_ozet` ve `/ara_senaryo` komutlarında çalışır; workspace dosyaları Gemini'ye otomatik gönderilmez.
 - Data classification: `PUBLIC`, `PRIVATE`, `PROJECT`, `SECRET` sınıfları policy dosyasından okunur; Gemini dosya aktarımı varsayılan kapalıdır.
 - Gemini rate limit: Kullanıcı başına {RATE_LIMIT_WINDOW} saniyede {GEMINI_RATE_LIMIT_REQUESTS} araştırma sınırı var.
 - Gemini günlük limit: Kullanıcı başına günlük {GEMINI_DAILY_LIMIT_REQUESTS} araştırma.
 - Tool whitelist: Model sadece {", ".join(sorted(ALLOWED_TOOL_NAMES))} araçlarını çağırabilir.
+- Model gateway: {litellm_state}
+- Model gizlilik profili: Takma adlar `yerel-` (veri çıkmaz) veya `dis-` (veri sağlayıcıya gider) önekiyle ayrılır; tanımsız ad yerel sayılmaz.
+- Model politika kapısı: Dış modele dosya gönderimi `assert_model_allowed()` ile sınıflandırmaya karşı denetlenir.
+- Zaman farkındalığı: Sistem promptuna güncel tarih enjekte edilir; model eskimiş bilgiyi güncel sanmaz.
 - Docker hardening: `read_only`, `tmpfs /tmp`, `no-new-privileges`, `cap_drop: ALL` compose dosyasında tanımlı.
 - Sır koruması: `.env` git/docker ignore içinde; loglarda `httpx` Telegram URL logları susturuldu.
 - Audit izi: Hassas içerik maskeleyen `AUDIT` satırları tutulur.
@@ -360,8 +374,8 @@ def build_security_report() -> str:
 2. Audit satırlarını ayrı dosya veya merkezi log sistemine yönlendir.
 3. Oran/limit ayarlarını `.env` üzerinden tamamen yönetilebilir yap.
 4. Onay akışını tek mekanizmada birleştir: `/rapor` ayrı bir `pending_save` deseni kullanıyor, diğer komutlar `pending_action` kullanıyor.
-5. `run_model_with_tools()` Execution katmanına taşınmalı; bunun için `OBSERVABILITY` singleton'ı `observability.py`'ye taşınmalı.
-6. LiteLLM: Ollama, Gemini ve diğer sağlayıcıları tek bir gateway üzerinden yönet.
+5. PostgreSQL `ai_memory`: Kalıcı hafıza ekle; her kaydı kaynağıyla (user/web/tool) etiketle.
+6. RAG: `rag_allowed` alanı policy dosyasında tanımlı ama henüz kullanılmıyor.
 ## Not
 Bu rapor model tarafından tahmin edilmez; mevcut kod sabitlerinden ve güvenlik ayarlarından üretilir.
 Yukarıdaki iyileştirme listesi elle güncellenir.
