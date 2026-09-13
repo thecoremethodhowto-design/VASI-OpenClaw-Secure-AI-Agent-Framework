@@ -141,3 +141,60 @@ def test_temizle_audit_izi_birakiyor(vasi_module):
     kaynak = inspect.getsource(vasi_module.cmd_temizle)
     assert "audit_event(" in kaynak
     assert "history_cleared" in kaynak
+
+
+# ── Gemini gunluk sayaci ─────────────────────────────────────────────────────
+
+def _gemini_kur(vasi_module, monkeypatch, kayitlar):
+    """GEMINI_API_KEY ayarlar ve sayaclari yerlestirir."""
+    monkeypatch.setattr(vasi_module, "GEMINI_API_KEY", "test-key")
+    vasi_module.GEMINI_DAILY_COUNTERS.clear()
+    vasi_module.GEMINI_DAILY_COUNTERS.update(kayitlar)
+
+
+def test_gemini_sayaci_dolu_sozlukle_calisiyor(vasi_module, monkeypatch):
+    """Sayac sozlugu BOSKEN hata vermiyordu; doluyken patliyordu.
+
+    GEMINI_DAILY_COUNTERS degerleri {"date": ..., "count": ...} sozlugu.
+    Eski kod bunu demet gibi aciyordu; sozluk uzerinde dongu ANAHTARLARI
+    verdigi icin "count" metni sayi sanilip toplanmaya calisiliyordu.
+
+    Bos sozlukte sum() sifir dondugu icin hata gorunmuyordu. Ilk /ara
+    komutundan sonra /saglik tamamen bozuluyordu.
+    """
+    from datetime import datetime
+    bugun = datetime.now().strftime("%Y-%m-%d")
+    _gemini_kur(vasi_module, monkeypatch, {
+        "kullanici1": {"date": bugun, "count": 3},
+        "kullanici2": {"date": bugun, "count": 2},
+    })
+    detay = vasi_module.build_gemini_health().details
+    assert "5/" in detay, f"beklenen 5, gelen: {detay}"
+
+
+def test_gemini_sayaci_eski_tarihleri_saymiyor(vasi_module, monkeypatch):
+    """Dunun sayaci bugunun kotasini doldurmamali."""
+    from datetime import datetime
+    bugun = datetime.now().strftime("%Y-%m-%d")
+    _gemini_kur(vasi_module, monkeypatch, {
+        "bugun": {"date": bugun, "count": 2},
+        "eski":  {"date": "2020-01-01", "count": 99},
+    })
+    assert "2/" in vasi_module.build_gemini_health().details
+
+
+def test_gemini_sayaci_bos_sozlukte_sifir(vasi_module, monkeypatch):
+    _gemini_kur(vasi_module, monkeypatch, {})
+    assert "0/" in vasi_module.build_gemini_health().details
+
+
+def test_saglik_raporu_dolu_sayacla_uretilebiliyor(vasi_module, monkeypatch):
+    """Uctan uca: /saglik komutunun cagirdigi fonksiyon patlamamali."""
+    from datetime import datetime
+    monkeypatch.setattr(vasi_module, "get_ollama_model_names", lambda: ["a", "b"])
+    bugun = datetime.now().strftime("%Y-%m-%d")
+    _gemini_kur(vasi_module, monkeypatch, {"k1": {"date": bugun, "count": 7}})
+
+    rapor = vasi_module.build_health_report()
+    assert "Gemini" in rapor
+    assert "7/" in rapor

@@ -22,6 +22,7 @@ bağlar.
 | 6 | Tedarik Zinciri | İsimle değil, parmak iziyle sabitle | Digest pinning, hash locking | ⚙️ |
 | 7 | Sosyal Mühendislik | Kimlik çok katmanlı doğrulansın | `is_authorized()` | ✅ |
 | 8 | Zehirli Üçgen | Emin değilsen "hayır" | Veri sınıflandırma | ✅ |
+| 9 | Model Yönlendirme | Verinin nereye gittiği görünür olsun | Gizlilik profili + politika kapısı | ✅ |
 
 **Test durumu:** ✅ birim testi var · ◐ kısmen · ⚙️ yapılandırma (birim
 testi uygun değil) · ❌ test yok
@@ -34,12 +35,23 @@ Kontroller dört katmana ayrılmıştır. İzin verilen bağımlılık yönü te
 taraflıdır; `tests/test_architecture.py` bunu doğrular.
 
 ```
-decision.py    Ne yapılmalı?          (bağımsız)
-access.py      İzin var mı?           (bağımsız)
+decision.py    Ne yapılmalı?          (yalnızca access'e bağımlı)
+access.py      İzin var mı?           (bağımsız — en alt katman)
 context.py     Model neyi bilmeli?    (bağımsız)
 execution.py   Şimdi yap              (yalnızca access'e bağımlı)
 vasi.py        Telegram + orkestrasyon
 ```
+
+Model çağrıları LiteLLM proxy'si üzerinden geçer. Takma adlar verinin
+nereye gittiğini söyler ve bu kural test edilir:
+
+```
+yerel-*   Model bu makinede çalışır. Veri dışarı çıkmaz.
+dis-*     Model bir sağlayıcıda çalışır. Veri makineden ayrılır.
+```
+
+Kurala uymayan bir takma ad **yerel sayılmaz** — yanlış isimlendirilmiş
+bir model, veri sızdırma kontrolünü sessizce atlayamaz.
 
 Hiçbir katman `vasi.py`'yi import etmez. Her dosya işlemi Access
 katmanından geçer — bu da bir iddia değil, test edilen bir garantidir.
@@ -159,8 +171,16 @@ sistem sessiz kalamaz.
 - `vasi.py` → `audit_event()` — güvenlik olayları kaydı
 - `observability.py` → `mask_user_id()` — kayıtlarda kimlik maskeleme
 
-**Tasarım notu:** `allow_redirects=False` kritik — izinli bir adres,
-yönlendirme yoluyla izinsiz bir adrese götüremiyor. Ayrıca kayıtlarda
+**Tasarım notu — yönlendirme:** Yönlendirmeler `requests`'in otomatik
+takibiyle **izlenmez.** Otomatik takipte yalnızca ilk URL doğrulanmış
+olur; ara adımlar kontrolsüz geçer. Bunun yerine her adım elle takip
+edilir ve `is_safe_url()` ile **yeniden doğrulanır** (en fazla 3 adım).
+Bu, `allow_redirects=True`'dan daha güvenlidir.
+
+**Tasarım notu — arama motorları:** Google/Bing gibi sorgu sayfaları
+reddedilir. Bot isteklerine JavaScript'e bağımlı boş bir kabuk
+dönerler; model bunu "araştırma yaptım" sanıp kaynaksız iddia
+üretebilir. Bu, sessiz başarısızlığın en tehlikeli türüdür. Ayrıca kayıtlarda
 kullanıcı kimliği tam tutulmuyor (son üç hane); korelasyon için yeterli,
 kaydın kendisini risk hâline getirecek kadar değil.
 
@@ -282,13 +302,50 @@ politika dosyası okunamazsa ya da sınıf tanımsızsa cevap "hayır" olur.
 
 ---
 
+## 9. Model Yönlendirme → Gizlilik Profili
+
+**İlke:** Bir modele veri gönderilirken, o verinin makineden çıkıp
+çıkmadığı **koddan anlaşılabilir** olmalı.
+
+**Neden:** Birden fazla sağlayıcı (yerel Ollama, Gemini, Claude) tek bir
+gateway arkasına alındığında, hangi çağrının veriyi dışarı taşıdığı
+görünmez hale gelir. İsimlendirme kuralı bunu geri görünür kılar.
+
+**Uygulama**
+- `litellm/config.yaml` → takma adlar `yerel-` / `dis-` önekli
+- `access.py` → `privacy_profile()`, `is_local()`, `leaves_machine()`
+- `access.py` → `assert_model_allowed()` — dış modele dosya gönderimini denetler
+- `decision.py` → `model_for_role()` — rol başına takma ad eşlemesi
+- `access.py` → `is_search_engine()` — arama motoru sayfaları reddedilir
+
+**Tasarım notu:** `is_local()` ile `leaves_machine()` birbirinin tersi
+**değildir.** Kurala uymayan bir takma ad hem "yerel değil" hem "veri
+çıkıyor" sayılır. Emin olunmayan durumda veri çıkıyor kabul edilir.
+
+**Tasarım notu — komut kullanımı:** Dış modeller asla otomatik
+seçilmez. Düz sohbet, `/kod`, `/senaryo` ve `/fikir` her zaman yerelde
+kalır. Gemini yalnızca `/ara*` komutlarında devreye girer. Bu hem
+maliyeti hem veri çıkışını kontrol eder.
+
+**Test**
+- `tests/test_litellm.py` → `test_takma_adlar_gizlilik_kuralina_uyuyor`
+- `tests/test_litellm.py` → `test_bilinmeyen_takma_ad_yerel_sayilmiyor`
+- `tests/test_litellm.py` → `test_dis_model_private_dosyayi_reddediyor`
+- `tests/test_litellm.py` → `test_dis_model_secret_dosyayi_reddediyor`
+- `tests/test_litellm.py` → `test_hicbir_komut_MODELS_i_dogrudan_kullanmiyor`
+- `tests/test_litellm.py` → `test_arama_motorlari_engelleniyor`
+- `tests/test_architecture.py` → `test_litellm_takma_adlari_onek_kuralina_uyuyor`
+- `tests/test_architecture.py` → `test_yerel_modeller_ollama_kullaniyor`
+
+---
+
 ## Testleri Çalıştırma
 
 ```bash
 docker compose run --rm vasi-core python -m pytest
 ```
 
-Beklenen: 78 test geçer.
+Beklenen: 141 test geçer.
 
 ---
 
@@ -298,9 +355,7 @@ Bu belge, kontrollerin **iddia edildiği gibi çalıştığını** göstermeyi
 amaçlar. Aşağıdakiler bilinen boşluklardır:
 
 1. `audit_event()` — doğrudan birim testi yok (Kontrol 5)
-2. `run_model_with_tools()` henüz `vasi.py`'de; Execution katmanına
-   taşınması `OBSERVABILITY` singleton'ının yeniden konumlandırılmasını
-   gerektiriyor
+2. Kalıcı hafıza yok; oturumlar arası bağlam taşınmıyor
 3. Kırmızı takım değerlendirmesi yapılmadı — testler kontrollerin
    yazıldığı gibi çalıştığını doğrular, kararlı bir saldırgana karşı
    yeterli olduğunu değil

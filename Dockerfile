@@ -24,6 +24,7 @@ COPY access.py .
 COPY context.py .
 COPY execution.py .
 COPY decision.py .
+COPY memory.py .
 COPY litellm ./litellm
 
 # Security: Non-root user oluştur

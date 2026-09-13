@@ -22,7 +22,8 @@ Bu depodaki her guvenlik kontrolu, belirli bir tehdit sinifinin analizinden cika
 ## Ozellikler
 
 - Telegram bot arayuzu
-- Yerel Ollama model baglantisi
+- LiteLLM proxy uzerinden coklu saglayici (yerel Ollama, Gemini, Claude)
+- Model gizlilik profili: `yerel-` / `dis-` takma adlari verinin nereye gittigini soyler
 - Workspace icinde bolmeli sandbox (`youtube`, `projeler`, `notlar`, `skills`)
 - Yazma/silme icin Telegram onay butonu + TTL
 - Tarih-saat damgali not ekleme
@@ -54,6 +55,11 @@ VASI'nin temel guvenlik prensibi: model onerir, kritik islemler kullanici onayi 
 `Kod` komutlari sadece `projeler/`, `skills/kod_yardimcisi.md` alaninda.
 - Gemini arastirmasi sadece belirli komutlarda calisir ve workspace dosyalarini otomatik gondermez.
 - Veri siniflandirmasi: dis aktarim tum siniflar icin varsayilan olarak kapalidir.
+- Model gizlilik profili: takma adlar `yerel-` (veri cikmaz) veya `dis-` (veri saglayiciya gider) onekiyle ayrilir. Kurala uymayan bir ad **yerel sayilmaz**.
+- Model politika kapisi: dis modele dosya gonderimi siniflandirmaya karsi denetlenir.
+- Yonlendirme dogrulamasi: redirect'ler otomatik izlenmez; her adim yeniden dogrulanir (en fazla 3 adim).
+- Arama motoru engeli: Google/Bing gibi sorgu sayfalari okunamaz.
+- Zaman farkindaligi: sistem promptuna guncel tarih enjekte edilir.
 - `.env` Git ve Docker build baglamindan dislanir.
 
 VASI, DACE mimarisiyle dort katmana ayrilmistir: `decision.py` (ne
@@ -64,6 +70,24 @@ hicbir katman `vasi.py`'yi import edemez, her dosya islemi Access
 katmanindan gecer.
 
 > Her kontrolun koddaki tam karsiligi, testleri ve **bilinen eksikleri** icin: [THREAT-MAPPING.md](THREAT-MAPPING.md)
+
+## Model Yonlendirme
+
+Hangi istegin hangi modele gittigini takma adlar belirler:
+
+| Girdi | Model | Neden |
+|---|---|---|
+| Duz metin (sohbet) | `yerel-genel` | Ucretsiz, veri cikmiyor |
+| `/kod`, `/kod_patch` | `yerel-kod` | Proje dosyalari makineden cikmamali |
+| `/senaryo`, `/fikir`, `/rapor` | `yerel-genel` | Yerel yeterli |
+| `/ara*` | `dis-arastirma` (Gemini) | Guncel web bilgisi gerekiyor |
+
+**Dis modeller asla otomatik secilmez.** Yalnizca acik kullanici
+komutuyla devreye girerler. Bu hem maliyeti hem veri cikisini kontrol
+eder.
+
+Yeni bir model eklerken `litellm/config.yaml` icinde onek kuralina
+uyun; uymayan bir takma ad mimari testte yakalanir.
 
 ## Kurulum
 
@@ -91,6 +115,10 @@ VASI_MODEL_GORSEL=qwen3:30b
 GEMINI_API_KEY=Gemini_API_keyiniz
 GEMINI_MODEL=gemini-2.5-flash
 PENDING_ACTION_TTL_SECONDS=600
+USE_LITELLM=true
+LITELLM_BASE_URL=http://litellm:4000
+LITELLM_MASTER_KEY=openssl_rand_hex_32_ile_uretin
+ANTHROPIC_API_KEY=
 GEMINI_DAILY_LIMIT_REQUESTS=60
 # WEB_RADAR_ALLOWLIST=github.com,openai.com,ai.google.dev
 ```
@@ -195,6 +223,8 @@ Not: `down --volumes` compose volume verilerini de siler.
 ├── pytest.ini
 ├── THREAT-MAPPING.md        # tehdit → kontrol eslesmesi
 ├── SECURITY.md              # guvenlik politikasi
+├── litellm/
+│   └── config.yaml              # model takma adlari (yerel-/dis-)
 ├── policies/
 │   └── data_classification.yaml
 ├── evaluation/
@@ -203,6 +233,7 @@ Not: `down --volumes` compose volume verilerini de siler.
 │   ├── conftest.py
 │   ├── test_architecture.py     # DACE katman sinirlari
 │   ├── test_authorization.py    # is_authorized() dort katman
+│   ├── test_litellm.py          # model yonlendirme + arac dongusu
 │   ├── test_security_core.py
 │   ├── test_observability.py
 │   └── test_degisiklikler.py

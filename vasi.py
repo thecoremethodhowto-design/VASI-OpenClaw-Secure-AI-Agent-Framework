@@ -1,5 +1,6 @@
 import os
 import json
+import difflib
 import glob
 import ipaddress
 import socket
@@ -107,6 +108,9 @@ from execution import (
     split_filename_and_content,
 )
 
+# ── MEMORY KATMANI ────────────────────────────────────────────────────────────
+import memory
+
 # ── DECISION KATMANI (DACE) ───────────────────────────────────────────────────
 import decision
 from decision import (
@@ -182,7 +186,7 @@ Komutlar:
 /kod_patch <istek> - Uygulanabilir patch taslağı üretir (dosya yazmaz)
 /guvenlik - Mevcut güvenlik kontrollerini deterministik raporlar
 /siniflandir <dosya> - Dosyanın veri sınıfını ve Gemini aktarım iznini gösterir
-/temizle - Konuşma geçmişini sıfırlar
+/temizle - Konuşma geçmişini sıfırlar\n/hatirla <bilgi> - Kalıcı bir hatıra kaydeder (onay ister)\n/hatirlananlar - Kayıtlı hatıraları listeler\n/unut <numara> - Bir hatırayı pasifleştirir (onay ister)
 /saglik - Bileşen sağlık durumunu gösterir
 /istatistik - Komut, hata ve model kullanım özetini gösterir
 /audit_ozet - Son olay ve audit özetini gösterir
@@ -384,13 +388,34 @@ Bu rapor model tarafından tahmin edilmez; mevcut kod sabitlerinden ve güvenlik
 Yukarıdaki iyileştirme listesi elle güncellenir.
 """
 
+def _aktif_hatiralar() -> list[str]:
+    """Sistem promptuna girecek hatiralari getirir.
+
+    KATMAN NOTU: context.py hatiralari kendisi okumaz; burada getirilip
+    parametre olarak verilir. Boylece Context katmani veritabanina
+    bagimli olmaz.
+
+    GUVENLIK: prompt_memories() yalnizca PROMPTA_GIREBILEN kaynakli
+    kayitlari dondurur. Bugun bu kume tek elemanli: ("user",).
+    """
+    try:
+        return memory.prompt_memories()
+    except Exception as e:
+        logger.warning(f"⚠️ Hatiralar okunamadi: {e}")
+        return []
+
+def build_memory_health() -> HealthCheck:
+    """Hafiza katmaninin durumunu HealthCheck'e cevirir."""
+    durum, detay = memory.health()
+    return HealthCheck("PostgreSQL", durum, details=detay)
+
 def build_health_report() -> str:
     checks = [
         timed_check("Ollama", lambda: f"{len(get_ollama_model_names())} model hazır"),
         build_gemini_health(),
         workspace_health(WORKSPACE),
         skills_health(WORKSPACE),
-        HealthCheck("PostgreSQL", "warn", details="henüz kurulmadı"),
+        build_memory_health(),
         HealthCheck("RAG", "warn", details="henüz kurulmadı"),
     ]
     return format_health_report(checks, OBSERVABILITY.last_command_summary())
@@ -409,7 +434,16 @@ def get_ollama_model_names() -> list[str]:
 def build_gemini_health() -> HealthCheck:
     if not GEMINI_API_KEY:
         return HealthCheck("Gemini", "warn", details="API key yok")
-    used = sum(count for _, count in GEMINI_DAILY_COUNTERS.values())
+    # GEMINI_DAILY_COUNTERS degerleri {"date": ..., "count": ...} sozlugudur.
+    # Sozluk uzerinde dongu ANAHTARLARI verir; demet gibi acmak "count"
+    # metnini sayi sanip toplamaya calisir. Ayrica yalnizca BUGUNE ait
+    # sayaclar toplanmali -- dunun sayaci bugunun kotasini doldurmamali.
+    bugun = datetime.now().strftime("%Y-%m-%d")
+    used = sum(
+        kayit.get("count", 0)
+        for kayit in GEMINI_DAILY_COUNTERS.values()
+        if kayit.get("date") == bugun
+    )
     return HealthCheck("Gemini", "ok", details=f"yapılandırıldı, günlük {used}/{GEMINI_DAILY_LIMIT_REQUESTS}")
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -534,7 +568,7 @@ async def cmd_fikir(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "YouTube/uygulama açısından olası kullanım, ilk 3 aksiyon.\n\n"
         f"Fikir: {fikir}"
     )
-    sonuc = await run_model_with_tools(model_for_role("teknik"), prompt, build_system_prompt(model_for_role("teknik")))
+    sonuc = await run_model_with_tools(model_for_role("teknik"), prompt, build_system_prompt(model_for_role("teknik"), _aktif_hatiralar()))
     preview, keyboard = set_pending(
         context,
         "append",
@@ -643,7 +677,7 @@ async def cmd_ara_senaryo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Araştırma notları:\n{arastirma[:9000]}\n\n"
         f"Konu:\n{konu}"
     )
-    sonuc = await run_model_with_tools(model_for_role("strateji"), prompt, build_system_prompt(model_for_role("strateji")))
+    sonuc = await run_model_with_tools(model_for_role("strateji"), prompt, build_system_prompt(model_for_role("strateji"), _aktif_hatiralar()))
     out_name = f"youtube/senaryolar/ara_senaryo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
     preview, keyboard = set_pending(
         context,
@@ -700,7 +734,7 @@ async def cmd_senaryo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Kanal tarzı:\n{kanal_tarzi[:6000]}\n\n"
         f"Video konusu:\n{konu}"
     )
-    sonuc = await run_model_with_tools(model_for_role("strateji"), prompt, build_system_prompt(model_for_role("strateji")))
+    sonuc = await run_model_with_tools(model_for_role("strateji"), prompt, build_system_prompt(model_for_role("strateji"), _aktif_hatiralar()))
     out_name = f"youtube/senaryolar/senaryo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
     preview, keyboard = set_pending(
         context,
@@ -745,7 +779,7 @@ async def cmd_kod(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sonuc = await run_model_with_tools(
         model_for_role("kod"),
         prompt,
-        build_code_system_prompt(model_for_role("kod")),
+        build_code_system_prompt(model_for_role("kod"), _aktif_hatiralar()),
         options={"temperature": 0.1, "top_p": 0.4},
     )
     for i in range(0, len(sonuc), 3900):
@@ -775,11 +809,124 @@ async def cmd_kod_patch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sonuc = await run_model_with_tools(
         model_for_role("kod"),
         prompt,
-        build_code_system_prompt(model_for_role("kod")),
+        build_code_system_prompt(model_for_role("kod"), _aktif_hatiralar()),
         options={"temperature": 0.1, "top_p": 0.4},
     )
     for i in range(0, len(sonuc), 3900):
         await update.message.reply_text(sonuc[i:i+3900])
+
+def _hafiza_kapali_mesaji() -> str:
+    return (
+        "❌ Kalıcı hafıza kapalı.\n\n"
+        "`.env` dosyasında `POSTGRES_PASSWORD` ayarlanmamış. "
+        "Bu olmadan hatıralar saklanamaz."
+    )
+
+async def cmd_hatirla(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Kalici bir hatira kaydeder. Onay gerektirir.
+
+    GUVENLIK: Hafizaya yazma, dosya yazma kadar ciddi bir islemdir --
+    bir hatira sonraki HER oturumda sistem promptuna girer. Bu yuzden
+    ayni onay mekanizmasindan gecer.
+    """
+    if not is_authorized(update): return
+    if not check_rate_limit(str(update.effective_user.id)):
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
+        return
+
+    if not memory.is_configured():
+        await update.message.reply_text(_hafiza_kapali_mesaji())
+        return
+
+    icerik = " ".join(context.args).strip()
+    if not icerik:
+        await update.message.reply_text(
+            "❌ Kullanım: /hatirla <hatırlanacak şey>\n\n"
+            "Örnek: /hatirla Bana Patron diye hitap et"
+        )
+        return
+
+    audit_event("remember_request", str(update.effective_user.id), icerik[:120])
+    preview, keyboard = set_pending(
+        context, "remember",
+        f"🧠 Şu kalıcı olarak hatırlansın mı?\n\n{icerik}\n\n"
+        f"_Not: Bu bilgi sonraki her oturumda modele gönderilecek._",
+        content=icerik,
+    )
+    await update.message.reply_text(preview, reply_markup=keyboard)
+
+async def cmd_hatirlananlar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Aktif hatiralari listeler."""
+    if not is_authorized(update): return
+    if not check_rate_limit(str(update.effective_user.id)):
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
+        return
+
+    if not memory.is_configured():
+        await update.message.reply_text(_hafiza_kapali_mesaji())
+        return
+
+    try:
+        kayitlar = memory.list_active()
+    except memory.MemoryError_ as e:
+        await update.message.reply_text(f"❌ Hatıralar okunamadı: {e}")
+        return
+
+    if not kayitlar:
+        await update.message.reply_text(
+            "🧠 Henüz kayıtlı hatıra yok.\n\n"
+            "Eklemek için: /hatirla <hatırlanacak şey>"
+        )
+        return
+
+    satirlar = ["🧠 Kayıtlı hatıralar:\n"]
+    for k in kayitlar:
+        tarih = k["created_at"].strftime("%d.%m.%Y")
+        satirlar.append(f"#{k['id']} — {k['content']}\n    _{tarih}_")
+    satirlar.append("\nSilmek için: /unut <numara>")
+    await update.message.reply_text("\n".join(satirlar))
+
+async def cmd_unut(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Bir hatirayi pasiflestirir. Onay gerektirir."""
+    if not is_authorized(update): return
+    if not check_rate_limit(str(update.effective_user.id)):
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
+        return
+
+    if not memory.is_configured():
+        await update.message.reply_text(_hafiza_kapali_mesaji())
+        return
+
+    arg = " ".join(context.args).strip()
+    if not arg.isdigit():
+        await update.message.reply_text(
+            "❌ Kullanım: /unut <numara>\n\n"
+            "Numaraları görmek için: /hatirlananlar"
+        )
+        return
+
+    memory_id = int(arg)
+    try:
+        kayit = memory.get_one(memory_id)
+    except memory.MemoryError_ as e:
+        await update.message.reply_text(f"❌ Okunamadı: {e}")
+        return
+
+    if not kayit:
+        await update.message.reply_text(f"❌ #{memory_id} bulunamadı.")
+        return
+    if not kayit["active"]:
+        await update.message.reply_text(f"ℹ️ #{memory_id} zaten pasif.")
+        return
+
+    audit_event("forget_request", str(update.effective_user.id), str(memory_id))
+    preview, keyboard = set_pending(
+        context, "forget",
+        f"🗑️ Şu hatıra unutulsun mu?\n\n#{memory_id} — {kayit['content']}\n\n"
+        f"_Not: Bu bilgi bu oturumda konuşulduysa, /temizle de kullanın._",
+        memory_id=memory_id,
+    )
+    await update.message.reply_text(preview, reply_markup=keyboard)
 
 async def cmd_temizle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Konusma gecmisini sifirlar. Konu degistirirken kullanilir."""
@@ -867,7 +1014,7 @@ async def cmd_rapor(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sonuc = await run_model_with_tools(
             model_for_role("strateji"),
             f"Detayli rapor yaz: {konu}",
-            build_system_prompt(model_for_role("strateji")),
+            build_system_prompt(model_for_role("strateji"), _aktif_hatiralar()),
         )
         out_name = f"notlar/rapor_{datetime.now().strftime('%H%M')}.md"
         context.user_data["pending_save"] = {
@@ -938,16 +1085,92 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result = append_file(pending["filename"], pending["content"], scope=scope)
         elif action == "delete":
             result = delete_file(pending["filename"], scope=scope)
+        elif action == "remember":
+            try:
+                yeni_id = memory.remember(pending["content"], origin="cmd_hatirla")
+                result = f"🧠 Hatırlandı (#{yeni_id}).\n\n{pending['content']}"
+            except memory.MemoryError_ as e:
+                result = f"❌ Kaydedilemedi: {e}"
+        elif action == "forget":
+            try:
+                if memory.forget(pending["memory_id"], origin="cmd_unut"):
+                    result = f"🗑️ #{pending['memory_id']} unutuldu."
+                else:
+                    result = f"❌ #{pending['memory_id']} bulunamadı veya zaten pasif."
+            except memory.MemoryError_ as e:
+                result = f"❌ İşlem başarısız: {e}"
         else:
             result = "Hata: Bilinmeyen işlem."
 
         context.user_data.pop("pending_action", None)
-        audit_event("pending_apply", user_id, f"{action}:{pending.get('filename', '-')}")
+        audit_event("pending_apply", user_id, f"{action}:{pending.get('filename', pending.get('memory_id', '-'))}")
         await query.edit_message_text(result)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 5. AJAN AKIŞI (AGENTIC WORKFLOW + TOOL CALLING)
 # ══════════════════════════════════════════════════════════════════════════════
+
+# Turkce klavyede i/ı ve s/ş yan yana. Telegram komut adlarinda yalnizca
+# ASCII kabul eder, bu yuzden /hatırla hicbir zaman gecerli bir komut
+# olamaz. Eslesme yaparken once normallestiriyoruz.
+_TR_ASCII = str.maketrans("ıİşŞğĞüÜöÖçÇ", "iisSgGuUoOcC")
+
+
+def _normalize_komut(metin: str) -> str:
+    return metin.translate(_TR_ASCII).lower()
+
+
+def _kayitli_komutlar(context: ContextTypes.DEFAULT_TYPE) -> set[str]:
+    """Uygulamaya kayitli tum komut adlarini toplar.
+
+    Elle liste tutmuyoruz: yeni bir komut eklendiginde bu kume
+    kendiliginden guncellenir.
+    """
+    komutlar: set[str] = set()
+    for grup in context.application.handlers.values():
+        for handler in grup:
+            if isinstance(handler, CommandHandler):
+                komutlar.update(handler.commands)
+    return komutlar
+
+
+async def cmd_bilinmeyen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Taninmayan / ile baslayan mesajlari yakalar.
+
+    Bu handler olmadan yanlis yazilmis bir komut SESSIZCE modele duser
+    ve model boslugu doldurur. Tam olarak bu yasandi: /hatırla (Turkce i)
+    komut olarak taninmadi, modele dustu, model "Bu bilgiyi not aldim"
+    dedi -- ve hicbir sey kaydedilmedi. Ardindan /hatırlananlar
+    veritabaninda olmayan bir liste uretti.
+
+    Hassas komutlarin (/sil, /unut, /hatirla) yanlis yazildiginda
+    iceriklerinin modele gitmesi ayrica istenmeyen bir durum.
+    """
+    if not is_authorized(update): return
+
+    ham = (update.message.text or "").split()[0]
+    yazilan = ham.lstrip("/").split("@")[0]
+    aranan = _normalize_komut(yazilan)
+
+    kayitli = _kayitli_komutlar(context)
+    audit_event("unknown_command", str(update.effective_user.id), ham[:60])
+
+    # Once tam eslesme (Turkce karakter duzeltmesi), sonra yakin eslesme
+    oneri = None
+    if aranan in kayitli:
+        oneri = aranan
+    else:
+        yakin = difflib.get_close_matches(aranan, sorted(kayitli), n=1, cutoff=0.7)
+        if yakin:
+            oneri = yakin[0]
+
+    satirlar = [f"❓ `{ham}` diye bir komut yok."]
+    if oneri:
+        satirlar.append(f"\nBunu mu demek istediniz: /{oneri}")
+    satirlar.append("\nTüm komutlar: /yardim")
+
+    await update.message.reply_text("\n".join(satirlar))
+
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update): return
@@ -964,7 +1187,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # DACE Decision: hangi model ve hangi skill baglami?
     model = pick_model(metin)
     skill_adi, skill_yolu = detect_skill(metin)
-    system_prompt = build_system_prompt(model)
+    system_prompt = build_system_prompt(model, _aktif_hatiralar())
 
     if skill_yolu:
         icerik, hata = read_file(skill_yolu, scope=skill_scope(skill_yolu))
@@ -1033,6 +1256,17 @@ if __name__ == "__main__":
         logger.info(f"📂 Workspace: {WORKSPACE}")
         logger.info(f"🤖 Ollama Host: {OLLAMA_HOST}")
         logger.info(logger_setup_msg)
+
+        # Hafiza semasi. Yapilandirilmamissa sessizce atlanir --
+        # PostgreSQL olmadan sistem calismaya devam etmeli.
+        if memory.is_configured():
+            try:
+                memory.init_schema()
+            except memory.MemoryError_ as e:
+                logger.warning(f"⚠️ Hafiza semasi kurulamadi: {e}")
+        else:
+            logger.info("💤 Hafiza kapali (POSTGRES_PASSWORD yok)")
+
         logger.info("="*60)
         
         app = Application.builder().token(TOKEN).build()
@@ -1055,12 +1289,21 @@ if __name__ == "__main__":
         app.add_handler(CommandHandler("guvenlik", observed_command("guvenlik", cmd_guvenlik)))
         app.add_handler(CommandHandler("siniflandir", observed_command("siniflandir", cmd_siniflandir)))
         app.add_handler(CommandHandler("temizle", observed_command("temizle", cmd_temizle)))
+        app.add_handler(CommandHandler("hatirla", observed_command("hatirla", cmd_hatirla)))
+        app.add_handler(CommandHandler("hatirlananlar", observed_command("hatirlananlar", cmd_hatirlananlar)))
+        app.add_handler(CommandHandler("unut", observed_command("unut", cmd_unut)))
         app.add_handler(CommandHandler("saglik", observed_command("saglik", cmd_saglik)))
         app.add_handler(CommandHandler("istatistik", observed_command("istatistik", cmd_istatistik)))
         app.add_handler(CommandHandler("audit_ozet", observed_command("audit_ozet", cmd_audit_ozet)))
         app.add_handler(CommandHandler("rapor", observed_command("rapor", cmd_rapor)))
         app.add_handler(CallbackQueryHandler(callback_handler))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+        # Taninmayan / komutlari modele DUSMEMELI. Bu handler message_handler'dan
+        # once kayitli; ayrica message_handler'in filtresi de / ile baslayan
+        # metinleri disliyor.
+        app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"^/"), cmd_bilinmeyen))
+        app.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND & ~filters.Regex(r"^/"), message_handler
+        ))
         
         logger.info("✅ Vasi aktif. OpenClaw yetenekleri devrede.")
         logger.info("📡 Polling başlatılıyor...")

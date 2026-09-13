@@ -36,7 +36,7 @@ def modul_importlari(dosya_adi: str) -> set[str]:
     return isimler
 
 
-YEREL_MODULLER = {"vasi", "access", "context", "execution", "decision", "observability"}
+YEREL_MODULLER = {"vasi", "access", "context", "execution", "decision", "memory", "observability"}
 
 
 # ── Bagimsizlik ──────────────────────────────────────────────────────────────

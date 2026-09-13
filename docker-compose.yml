@@ -49,6 +49,11 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-vasi}
+      POSTGRES_USER: ${POSTGRES_USER:-vasi}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      MAX_HISTORY_TURNS: ${MAX_HISTORY_TURNS:-10}
     restart: unless-stopped
     networks:
       - vasi-network
@@ -59,6 +64,43 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+
+  postgres:
+    # ⚠️ DIGEST'İ KENDİN DOLDUR:
+    #   docker pull postgres:18.6-alpine
+    #   docker inspect --format='{{index .RepoDigests 0}}' postgres:18.6-alpine
+    #
+    # NEDEN 19 DEGIL: PostgreSQL 19 su an beta asamasinda, final surumu
+    # Eylul/Ekim 2026'da bekleniyor. Yeni cikan bir ANA surumu hemen
+    # almak, LiteLLM'de kacindik ayni riski tekrarlamak olur.
+    # 18 ana surumu Eylul 2025'ten beri sahada; 18.6 Agustos 2026
+    # guvenlik yamasi.
+    image: postgres@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2
+
+    container_name: vasi-postgres
+    # Port YAYINLANMIYOR: veritabani yalnizca vasi-network icinden
+    # erisilebilir. Host'tan baglanmak istersen gecici olarak
+    # `docker compose exec postgres psql -U vasi` kullan.
+    expose:
+      - "5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-vasi}
+      POSTGRES_USER: ${POSTGRES_USER:-vasi}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Alpine imaji icin: veri dizini
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - vasi-network
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vasi} -d ${POSTGRES_DB:-vasi}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   vasi-core:
     build: .
@@ -102,3 +144,4 @@ networks:
     driver: bridge
 volumes:
   ollama_data:
+  postgres_data:
