@@ -339,6 +339,11 @@ def build_security_report() -> str:
     ollama_scope = "yerel/izinli" if ollama_host in LOCAL_OLLAMA_HOSTS else "uzak"
     api_key_state = "var" if bool(OLLAMA_API_KEY) else "yok"
     allowlist_state = ", ".join(WEB_RADAR_ALLOWLIST) if WEB_RADAR_ALLOWLIST else "kapalı (public hostlara açık)"
+    hafiza_state = (
+        "Kapalı (POSTGRES_PASSWORD yok); oturumlar arası bağlam taşınmaz."
+        if not memory.is_configured()
+        else f"Açık; yalnızca {'/'.join(memory.PROMPTA_GIREBILEN)} kaynaklı kayıtlar sistem promptuna girer."
+    )
     litellm_state = (
         f"LiteLLM proxy aktif ({LITELLM_BASE_URL}); model çağrıları takma adlar üzerinden yönlendirilir."
         if USE_LITELLM
@@ -370,6 +375,12 @@ def build_security_report() -> str:
 - Model gizlilik profili: Takma adlar `yerel-` (veri çıkmaz) veya `dis-` (veri sağlayıcıya gider) önekiyle ayrılır; tanımsız ad yerel sayılmaz.
 - Model politika kapısı: Dış modele dosya gönderimi `assert_model_allowed()` ile sınıflandırmaya karşı denetlenir.
 - Zaman farkındalığı: Sistem promptuna güncel tarih enjekte edilir; model eskimiş bilgiyi güncel sanmaz.
+- Konuşma geçmişi: Son {MAX_HISTORY_TURNS} tur bellekte tutulur; araç sonuçları geçmişe GİRMEZ.
+- Kalıcı hafıza: {hafiza_state}
+- Hafıza yazma kapısı: `/hatirla` ve `/unut` Telegram onay butonu ister; model kendi başına hatırlayamaz.
+- Hafıza kaynak etiketi: `remember()` imzasında `source` parametresi yoktur; kod her zaman `user` yazar.
+- Hafıza silme: `/unut` kaydı silmez, `active=false` yapar; denetim izi korunur.
+- Bilinmeyen komut koruması: Tanınmayan `/` komutları modele düşmez; doğru komut önerilir.
 - Docker hardening: `read_only`, `tmpfs /tmp`, `no-new-privileges`, `cap_drop: ALL` compose dosyasında tanımlı.
 - Sır koruması: `.env` git/docker ignore içinde; loglarda `httpx` Telegram URL logları susturuldu.
 - Audit izi: Hassas içerik maskeleyen `AUDIT` satırları tutulur.
@@ -381,7 +392,7 @@ def build_security_report() -> str:
 2. Audit satırlarını ayrı dosya veya merkezi log sistemine yönlendir.
 3. Oran/limit ayarlarını `.env` üzerinden tamamen yönetilebilir yap.
 4. Onay akışını tek mekanizmada birleştir: `/rapor` ayrı bir `pending_save` deseni kullanıyor, diğer komutlar `pending_action` kullanıyor.
-5. PostgreSQL `ai_memory`: Kalıcı hafıza ekle; her kaydı kaynağıyla (user/web/tool) etiketle.
+5. Hafıza türlerini ayrıştır: şema `fact` ve `context` türlerini tanımlıyor ama hepsi `preference` olarak yazılıyor.
 6. RAG: `rag_allowed` alanı policy dosyasında tanımlı ama henüz kullanılmıyor.
 ## Not
 Bu rapor model tarafından tahmin edilmez; mevcut kod sabitlerinden ve güvenlik ayarlarından üretilir.

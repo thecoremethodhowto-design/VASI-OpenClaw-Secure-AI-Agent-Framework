@@ -31,6 +31,8 @@ Bu depodaki her guvenlik kontrolu, belirli bir tehdit sinifinin analizinden cika
 - Baslik, aciklama, kapak fikri ve senaryo uretme
 - Proje dosyalarini dikkate alan kod yardimi
 - Veri siniflandirma politikasi (`PUBLIC`, `PRIVATE`, `PROJECT`, `SECRET`)
+- Konusma gecmisi (son 10 tur) ve `/temizle`
+- PostgreSQL kalici hafiza: `/hatirla`, `/hatirlananlar`, `/unut`
 - Deterministik `/guvenlik` raporu
 - Gozlemlenebilirlik: `/saglik`, `/istatistik`, `/audit_ozet`
 - Gemini API ile kaynakli internet arastirmasi
@@ -60,6 +62,10 @@ VASI'nin temel guvenlik prensibi: model onerir, kritik islemler kullanici onayi 
 - Yonlendirme dogrulamasi: redirect'ler otomatik izlenmez; her adim yeniden dogrulanir (en fazla 3 adim).
 - Arama motoru engeli: Google/Bing gibi sorgu sayfalari okunamaz.
 - Zaman farkindaligi: sistem promptuna guncel tarih enjekte edilir.
+- Hafiza butunlugu: model kendi basina hatirlayamaz; kayit icin acik komut ve onay gerekir. Kaynak etiketini KOD atar -- `remember()` imzasinda `source` parametresi yoktur.
+- Hafiza filtresi: yalnizca `source='user'` kayitlari sistem promptuna girer.
+- Silme yerine pasiflestirme: `/unut` kaydi silmez, `active=false` yapar; denetim izi korunur.
+- Taninmayan komutlar modele dusmez; `/hatırla` gibi Turkce karakterli yazimlar yakalanir ve dogru komut onerilir.
 - `.env` Git ve Docker build baglamindan dislanir.
 
 VASI, DACE mimarisiyle dort katmana ayrilmistir: `decision.py` (ne
@@ -81,6 +87,32 @@ Hangi istegin hangi modele gittigini takma adlar belirler:
 | `/kod`, `/kod_patch` | `yerel-kod` | Proje dosyalari makineden cikmamali |
 | `/senaryo`, `/fikir`, `/rapor` | `yerel-genel` | Yerel yeterli |
 | `/ara*` | `dis-arastirma` (Gemini) | Guncel web bilgisi gerekiyor |
+
+## Hafiza
+
+Iki ayri katman var ve karistirilmamalari onemli:
+
+| | Ne | Nerede | Omru |
+|---|---|---|---|
+| **Konusma gecmisi** | Son 10 tur | Bellekte | Oturum boyunca |
+| **Kalici hafiza** | Acikca kaydedilen bilgiler | PostgreSQL | Kalici |
+
+Konusma gecmisine yalnizca kullanici mesaji ve modelin nihai cevabi
+girer. **Arac sonuclari (web icerigi, dosya icerigi) GIRMEZ** -- bir web
+sayfasindaki gizli talimat gecmise girerse, sonraki her turda modele
+tekrar gonderilir; tek seferlik bir enjeksiyon kalici hale gelir.
+
+Kalici hafizaya yazmak icin acik komut ve onay gerekir:
+
+```text
+/hatirla Bana Patron diye hitap et
+/hatirlananlar
+/unut 1
+/temizle
+```
+
+`POSTGRES_PASSWORD` bos birakilirsa hafiza kapali kalir ve sistem
+normal calismaya devam eder.
 
 **Dis modeller asla otomatik secilmez.** Yalnizca acik kullanici
 komutuyla devreye girerler. Bu hem maliyeti hem veri cikisini kontrol
@@ -211,6 +243,7 @@ Not: `down --volumes` compose volume verilerini de siler.
 .
 ├── vasi.py                  # Telegram + orkestrasyon
 ├── decision.py              # DACE: ne yapilmali?
+├── memory.py                # kalici hafiza (PostgreSQL)
 ├── access.py                # DACE: izin var mi?
 ├── context.py               # DACE: model neyi bilmeli?
 ├── execution.py             # DACE: simdi yap
@@ -234,6 +267,9 @@ Not: `down --volumes` compose volume verilerini de siler.
 │   ├── test_architecture.py     # DACE katman sinirlari
 │   ├── test_authorization.py    # is_authorized() dort katman
 │   ├── test_litellm.py          # model yonlendirme + arac dongusu
+│   ├── test_history.py          # konusma gecmisi
+│   ├── test_memory.py           # kalici hafiza + kaynak etiketi
+│   ├── test_unknown_command.py  # taninmayan komut yakalama
 │   ├── test_security_core.py
 │   ├── test_observability.py
 │   └── test_degisiklikler.py

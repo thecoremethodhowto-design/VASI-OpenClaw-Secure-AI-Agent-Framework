@@ -34,6 +34,8 @@ varsayıma göre tasarlanmıştır.
 - Dolaylı talimat enjeksiyonu (prompt injection)
 - Bağımlılık / tedarik zinciri bütünlüğü
 - Hassas verinin dış servislere sızması
+- Model yönlendirme: hangi verinin hangi sağlayıcıya gittiği
+- Hafıza bütünlüğü: bir hatıranın kaynağı ve prompta girip girmediği
 
 **Kapsam dışında:**
 - Çok kullanıcılı erişim kontrolü
@@ -67,6 +69,11 @@ dayanır:
 7. **Çok katmanlı kimlik** — Kimlik tek katmanla doğrulanmaz; "kim"
    kadar "nereden" ve "ne zaman" da sorulur.
 8. **Varsayılan hayır** — Emin olunmayan durumda cevap "hayır"dır.
+9. **Görünür yönlendirme** — Bir modele veri gönderilirken, o verinin
+   makineden çıkıp çıkmadığı koddan anlaşılabilir olmalıdır.
+10. **Kaynak etiketi koddan gelir** — Bir hatıranın nereden geldiğini
+    kod belirler, model değil. Hafızaya yazma, dosya yazma kadar ciddi
+    bir işlemdir ve aynı onay mekanizmasından geçer.
 
 Her ilkenin koddaki tam karşılığı, ilgili testleri ve bilinen eksikleri
 için: **[THREAT-MAPPING.md](THREAT-MAPPING.md)**
@@ -101,6 +108,12 @@ yapılandırma değerlerinden okunur.
   kontrollerin yazıldığı gibi çalıştığını doğrular, kararlı bir
   saldırgana karşı yeterli olduğunu değil
 - Log rotasyonu uygulanmamıştır
+- Hafıza türleri ayrıştırılmıyor; tüm kayıtlar `preference` olarak saklanıyor
+- `/unut` bir hatırayı pasifleştirir, ancak o hatıra son turlarda
+  konuşulduysa model onu hâlâ konuşma geçmişinde görebilir
+- LiteLLM proxy'si ayrı bir bağımlılıktır; Mart 2026'da tedarik zinciri
+  saldırısına uğradığı için sürüm sabitlenmiş ve güncellemeler elle
+  gözden geçirilerek yapılmaktadır
 
 Güncel liste için `/guvenlik` raporunun "Gerçekçi Sıradaki
 İyileştirmeler" bölümüne bakınız.
@@ -117,4 +130,10 @@ Bu sistem, çalıştıran kişinin şu önlemleri almasını varsayar:
   kontrolü etkisiz kalır
 - Ollama sunucusu uzak bir hosttaysa API anahtarı ile korunmalıdır
 - Bağımlılıklar güncellenirken hash'ler yeniden üretilmelidir
+- `LITELLM_MASTER_KEY` rastgele üretilmelidir (`openssl rand -hex 32`)
+- `POSTGRES_PASSWORD` rastgele üretilmelidir (`openssl rand -hex 24`);
+  boş bırakılırsa kalıcı hafıza kapalı kalır
+- LiteLLM ve PostgreSQL sürümleri yükseltilmeden önce güvenlik
+  duyuruları kontrol edilmelidir; yeni yayınlanmış sürümler hemen
+  alınmamalıdır
   (bkz. THREAT-MAPPING.md → Kontrol 6)
