@@ -108,5 +108,3 @@ def skill_scope(skill_path: str) -> str:
     genislemez; daralir.
     """
     return SKILL_SCOPES.get(skill_path, "general")
-
-# ── MODEL GIZLILIK PROFILI ────────────────────────────────────
