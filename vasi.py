@@ -6,6 +6,7 @@ import ipaddress
 import socket
 import requests
 import logging
+from logging.handlers import RotatingFileHandler
 import html
 import time
 from functools import wraps
@@ -143,15 +144,46 @@ if not WORKSPACE.exists():
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 # ── LOGGING SETUP ────────────────────────────────────────────────────────────
+# Doner dosya: uzun sureli kullanimda log dosyasi sinirsiz buyumesin.
+# Varsayilan 10 MB x 5 dosya = en fazla 50 MB disk.
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(10 * 1024 * 1024)))
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "5"))
+AUDIT_LOG_FILE = os.getenv("AUDIT_LOG_FILE", "/tmp/vasi_audit.log")
+
+_log_bicimi = logging.Formatter(
+    "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+
+
+def _doner_dosya(yol: str) -> logging.Handler:
+    """Boyut sinirina ulasinca donen dosya yazicisi."""
+    h = RotatingFileHandler(
+        yol, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8"
+    )
+    h.setFormatter(_log_bicimi)
+    return h
+
+
+class _SadeceAudit(logging.Filter):
+    """Yalnizca AUDIT ile baslayan satirlari gecirir."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return str(record.getMessage()).startswith("AUDIT |")
+
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler()
-    ]
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[_doner_dosya(LOG_FILE), logging.StreamHandler()],
 )
-logger = logging.getLogger('vasi')
+logger = logging.getLogger("vasi")
+
+# Audit satirlari AYRICA kendi dosyasina yazilir. Genel logdan da
+# silinmez -- olay sirasi orada korunur. Amac, denetim kayitlarini
+# gurultuden ayirip daha uzun sure saklayabilmek.
+_audit_yazici = _doner_dosya(AUDIT_LOG_FILE)
+_audit_yazici.addFilter(_SadeceAudit())
+logger.addHandler(_audit_yazici)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext").setLevel(logging.INFO)
@@ -388,16 +420,43 @@ def build_security_report() -> str:
 - Gemini API key durumu: {"var" if bool(GEMINI_API_KEY) else "yok"}; model: `{GEMINI_MODEL}`.
 
 ## Gerçekçi Sıradaki İyileştirmeler
-1. Log rotasyonu ekle: Uzun süreli kullanımda `/tmp/vasi_audit.log` veya host logları büyümesin.
-2. Audit satırlarını ayrı dosya veya merkezi log sistemine yönlendir.
-3. Oran/limit ayarlarını `.env` üzerinden tamamen yönetilebilir yap.
-4. Onay akışını tek mekanizmada birleştir: `/rapor` ayrı bir `pending_save` deseni kullanıyor, diğer komutlar `pending_action` kullanıyor.
-5. Hafıza türlerini ayrıştır: şema `fact` ve `context` türlerini tanımlıyor ama hepsi `preference` olarak yazılıyor.
-6. RAG: `rag_allowed` alanı policy dosyasında tanımlı ama henüz kullanılmıyor.
+1. Audit satırlarını merkezi bir log sistemine yönlendir (şu an yerel dosyada).
+2. Kırmızı takım değerlendirmesi yap: testler kontrollerin yazıldığı gibi çalıştığını doğrular.
+3. Hafıza türlerini ayrıştır: şema `fact` ve `context` türlerini tanımlıyor ama hepsi `preference` olarak yazılıyor.
+4. RAG: `rag_allowed` alanı policy dosyasında tanımlı ama henüz kullanılmıyor.
 ## Not
 Bu rapor model tarafından tahmin edilmez; mevcut kod sabitlerinden ve güvenlik ayarlarından üretilir.
 Yukarıdaki iyileştirme listesi elle güncellenir.
 """
+
+# run_model_with_tools ve gemini_grounded_research hata durumunda
+# ISTISNA FIRLATMAZ; hata metnini DONDURUR. Kontrol edilmezse o metin
+# icerik sanilip dosyaya yazilir. Bu, seride tekrar eden oruntu:
+# basarisizlik hata degil, CEVAP uretiyor.
+MODEL_HATA_ONEKLERI = (
+    "Model hatası:",
+    "Model bulunamadı:",
+    "Radar Hatasi",
+    "❌",
+    "Hata:",
+    "Güvenlik:",
+)
+
+
+def model_ciktisi_kaydedilebilir(sonuc: str) -> bool:
+    """Model ciktisi bir dosyaya yazilacak kadar saglikli mi?"""
+    if not sonuc or not sonuc.strip():
+        return False
+    return not sonuc.lstrip().startswith(MODEL_HATA_ONEKLERI)
+
+
+async def _uretim_basarisiz(update: Update, sonuc: str) -> None:
+    """Uretim basarisiz oldugunda kullaniciya bildirir, kaydetme sunmaz."""
+    await update.message.reply_text(
+        "❌ İçerik üretilemedi, kaydetme iptal edildi.\n\n"
+        f"{(sonuc or '(boş yanıt)')[:400]}"
+    )
+
 
 def _aktif_hatiralar() -> list[str]:
     """Sistem promptuna girecek hatiralari getirir.
@@ -580,6 +639,10 @@ async def cmd_fikir(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Fikir: {fikir}"
     )
     sonuc = await run_model_with_tools(model_for_role("teknik"), prompt, build_system_prompt(model_for_role("teknik"), _aktif_hatiralar()))
+    if not model_ciktisi_kaydedilebilir(sonuc):
+        await _uretim_basarisiz(update, sonuc)
+        return
+
     preview, keyboard = set_pending(
         context,
         "append",
@@ -628,6 +691,10 @@ async def cmd_ara_not(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     sonuc = gemini_grounded_research(konu)
+    if not model_ciktisi_kaydedilebilir(sonuc):
+        await _uretim_basarisiz(update, sonuc)
+        return
+
     preview, keyboard = set_pending(
         context,
         "append",
@@ -690,6 +757,10 @@ async def cmd_ara_senaryo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     sonuc = await run_model_with_tools(model_for_role("strateji"), prompt, build_system_prompt(model_for_role("strateji"), _aktif_hatiralar()))
     out_name = f"youtube/senaryolar/ara_senaryo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+    if not model_ciktisi_kaydedilebilir(sonuc):
+        await _uretim_basarisiz(update, sonuc)
+        return
+
     preview, keyboard = set_pending(
         context,
         "save",
@@ -747,6 +818,10 @@ async def cmd_senaryo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     sonuc = await run_model_with_tools(model_for_role("strateji"), prompt, build_system_prompt(model_for_role("strateji"), _aktif_hatiralar()))
     out_name = f"youtube/senaryolar/senaryo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+    if not model_ciktisi_kaydedilebilir(sonuc):
+        await _uretim_basarisiz(update, sonuc)
+        return
+
     preview, keyboard = set_pending(
         context,
         "save",
@@ -858,6 +933,10 @@ async def cmd_hatirla(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     audit_event("remember_request", str(update.effective_user.id), icerik[:120])
+    if not model_ciktisi_kaydedilebilir(sonuc):
+        await _uretim_basarisiz(update, sonuc)
+        return
+
     preview, keyboard = set_pending(
         context, "remember",
         f"🧠 Şu kalıcı olarak hatırlansın mı?\n\n{icerik}\n\n"
@@ -1028,17 +1107,16 @@ async def cmd_rapor(update: Update, context: ContextTypes.DEFAULT_TYPE):
             build_system_prompt(model_for_role("strateji"), _aktif_hatiralar()),
         )
         out_name = f"notlar/rapor_{datetime.now().strftime('%H%M')}.md"
-        context.user_data["pending_save"] = {
-            "filename": out_name,
-            "content": sonuc,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "scope": "general",
-        }
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("Kaydet", callback_data="save_pending:evet"),
-            InlineKeyboardButton("İptal", callback_data="save_pending:iptal")
-        ]])
-        await update.message.reply_text(f"Rapor hazir. Kaydedilsin mi?\n\n{sonuc[:300]}...", reply_markup=keyboard)
+        if not model_ciktisi_kaydedilebilir(sonuc):
+            await _uretim_basarisiz(update, sonuc)
+            return
+
+        preview, keyboard = set_pending(
+            context, "save",
+            f"'{out_name}' dosyasına kaydedilsin mi?\n\n{sonuc[:300]}...",
+            filename=out_name, content=sonuc, scope="general",
+        )
+        await update.message.reply_text(preview, reply_markup=keyboard)
     except Exception as e:
         logger.error(f"❌ Rapor üretme hatası: {e}", exc_info=True)
         await update.message.reply_text("❌ Rapor oluşturulamadı. Lütfen daha sonra deneyin.")
@@ -1054,29 +1132,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"🔘 Callback: {query.data} - {update.effective_user.id}")
     user_id = str(update.effective_user.id)
     
-    if query.data in {"save_pending:iptal", "pending:no"}:
+    if query.data == "pending:no":
         audit_event("pending_cancel", user_id, query.data)
         context.user_data.pop("pending_action", None)
-        context.user_data.pop("pending_save", None)
         await query.edit_message_text("❌ İptal edildi.")
-    elif query.data == "save_pending:evet":
-        pending = context.user_data.get("pending_save")
-        if pending:
-            if is_pending_expired(pending):
-                context.user_data.pop("pending_save", None)
-                audit_event("pending_expired", user_id, "save_pending")
-                await query.edit_message_text("⏱️ Onay süresi doldu. İşlem iptal edildi.")
-                return
-            result = save_file(
-                pending["filename"],
-                pending["content"],
-                scope=pending.get("scope", "general"),
-            )
-            context.user_data.pop("pending_save", None)
-            audit_event("pending_save_apply", user_id, pending["filename"])
-            await query.edit_message_text(result)
-        else:
-            await query.edit_message_text("❌ Kaydetme verisi bulunamadı.")
     elif query.data == "pending:yes":
         pending = context.user_data.get("pending_action")
         if not pending:

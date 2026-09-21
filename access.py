@@ -29,9 +29,11 @@ WEB_RADAR_ALLOWLIST_RAW = os.getenv("WEB_RADAR_ALLOWLIST", "")
 GEMINI_DAILY_LIMIT_REQUESTS = int(os.getenv("GEMINI_DAILY_LIMIT_REQUESTS", "60"))
 
 # ── SABITLER ─────────────────────────────────────────────────────────────────
-RATE_LIMIT_WINDOW = 60
-RATE_LIMIT_REQUESTS = 20
-GEMINI_RATE_LIMIT_REQUESTS = 5
+# Oran/limit ayarlari .env uzerinden yonetilir. Varsayilanlar tek
+# operatorlu bir sistem icin secildi; paylasimli kullanimda dusurun.
+RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))
+RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "20"))
+GEMINI_RATE_LIMIT_REQUESTS = int(os.getenv("GEMINI_RATE_LIMIT_REQUESTS", "5"))
 ALLOWED_WRITE_EXTENSIONS = {".md", ".txt", ".json", ".yaml", ".yml", ".csv"}
 WEB_RADAR_ALLOWLIST = tuple(
     domain.strip().lower()
