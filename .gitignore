@@ -33,3 +33,11 @@ workspace/skills/*
 # Evaluation sonuçları — kişisel, repoya girmesin
 evaluation/results/*
 !evaluation/results/.gitkeep
+# ── Workspace ──
+# Kisisel icerik (notlar, senaryolar, raporlar) takip edilmez.
+# Klasor yapisi .gitkeep dosyalariyla korunur. skills/ sistemin
+# davranisini belirledigi icin takipte kalir.
+workspace/**
+!workspace/**/
+!workspace/**/.gitkeep
+!workspace/skills/**
