@@ -394,6 +394,7 @@ def test_tum_prompt_cagrilari_hatiralari_gonderiyor(vasi_module):
     cagrilar = (
         cagrilari_bul(kaynak, "build_system_prompt")
         + cagrilari_bul(kaynak, "build_code_system_prompt")
+        + cagrilari_bul(kaynak, "build_rag_system_prompt")
     )
     # Import satirlarini ve tanimlari disla
     cagrilar = [c for c in cagrilar if "model: str" not in c]

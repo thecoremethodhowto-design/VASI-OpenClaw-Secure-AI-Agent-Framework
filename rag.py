@@ -55,6 +55,12 @@ EMBED_TIMEOUT = int(os.getenv("RAG_EMBED_TIMEOUT", "120"))
 CHUNK_MAX_CHARS = int(os.getenv("RAG_CHUNK_MAX_CHARS", "1200"))
 SEARCH_TOP_K = int(os.getenv("RAG_SEARCH_TOP_K", "5"))
 
+# /sor icin en dusuk benzerlik. Ilgisiz parca gondermek, modeli bos
+# baglamdan cevap uydurmaya iter. Deger bu indekste gozlemlenen
+# skorlara gore secildi: ilgili parcalar ~0.60, ilgisizler ~0.35-0.45.
+# Kendi verinizde farkli olabilir; /bul ile skorlara bakip ayarlayin.
+RAG_MIN_SCORE = float(os.getenv("RAG_MIN_SCORE", "0.50"))
+
 # Yalnizca metin dosyalari. Ikili dosyalar anlamsiz parcalar uretir.
 INDEKSLENEBILIR_UZANTILAR = {".md", ".txt", ".py", ".yaml", ".yml", ".json", ".csv"}
 
@@ -413,7 +419,12 @@ def index_workspace() -> dict:
 
 # ── ARAMA ─────────────────────────────────────────────────────────────────────
 
-def search(sorgu: str, k: int | None = None, dosya_basina_tek: bool = False) -> list[dict]:
+def search(
+    sorgu: str,
+    k: int | None = None,
+    dosya_basina_tek: bool = False,
+    min_skor: float | None = None,
+) -> list[dict]:
     """Sorguya anlamca en yakin parcalari dondurur. Model KULLANMAZ.
 
     Sonuclar yalnizca kullaniciya gosterilir; hicbir yere gonderilmez.
@@ -430,6 +441,9 @@ def search(sorgu: str, k: int | None = None, dosya_basina_tek: bool = False) -> 
       dosya gostermek daha kullanisli.
       /sor icin False -- ayni dosyanin birden fazla bolumu modele daha
       fazla baglam verir.
+
+    min_skor: Bu esigin altindaki parcalar elenir. /bul icin None (hepsi
+      gosterilir, skorlar gorunur); /sor icin RAG_MIN_SCORE.
     """
     sorgu = (sorgu or "").strip()
     if not sorgu:
@@ -461,6 +475,9 @@ def search(sorgu: str, k: int | None = None, dosya_basina_tek: bool = False) -> 
             "provenance": koken,
             "score": cosine(sorgu_vektoru, list(vektor)),
         })
+
+    if min_skor is not None:
+        sonuclar = [s for s in sonuclar if s["score"] >= min_skor]
 
     sonuclar.sort(key=lambda s: s["score"], reverse=True)
 

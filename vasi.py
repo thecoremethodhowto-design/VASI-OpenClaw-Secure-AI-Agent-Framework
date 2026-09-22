@@ -73,6 +73,8 @@ from access import (
 # ── CONTEXT KATMANI (DACE) ────────────────────────────────────────────────────
 import context
 from context import (
+    build_rag_context,
+    build_rag_system_prompt,
     CODE_CONTEXT_FILES,
     MAX_HISTORY_TURNS,
     append_turn,
@@ -89,6 +91,8 @@ from context import (
 # ── EXECUTION KATMANI (DACE) ──────────────────────────────────────────────────
 import execution
 from execution import (
+    is_model_local,
+    run_model_without_tools,
     LOCAL_OLLAMA_HOSTS,
     logger_setup_msg,
     MAX_REDIRECT_HOPS,
@@ -222,7 +226,7 @@ Komutlar:
 /kod_patch <istek> - Uygulanabilir patch taslağı üretir (dosya yazmaz)
 /guvenlik - Mevcut güvenlik kontrollerini deterministik raporlar
 /siniflandir <dosya> - Dosyanın veri sınıfını ve Gemini aktarım iznini gösterir
-/temizle - Konuşma geçmişini sıfırlar\n/hatirla <bilgi> - Kalıcı bir hatıra kaydeder (onay ister)\n/hatirlananlar - Kayıtlı hatıraları listeler\n/unut <numara> - Bir hatırayı pasifleştirir (onay ister)\n/indeksle - Belgeleri RAG indeksine ekler (politikanın izin verdikleri)\n/bul <sorgu> - İndekste anlamsal arama (model kullanmaz)
+/temizle - Konuşma geçmişini sıfırlar\n/hatirla <bilgi> - Kalıcı bir hatıra kaydeder (onay ister)\n/hatirlananlar - Kayıtlı hatıraları listeler\n/unut <numara> - Bir hatırayı pasifleştirir (onay ister)\n/indeksle - Belgeleri RAG indeksine ekler (politikanın izin verdikleri)\n/bul <sorgu> - İndekste anlamsal arama (model kullanmaz)\n/sor <soru> - Belgelerine dayalı cevap (yerel model, araçsız)
 /saglik - Bileşen sağlık durumunu gösterir
 /istatistik - Komut, hata ve model kullanım özetini gösterir
 /audit_ozet - Son olay ve audit özetini gösterir
@@ -1096,6 +1100,102 @@ async def cmd_bul(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(_bul_sonucu(sorgu, sonuclar))
 
+def _sor_kaynaklari(parcalar: list[dict]) -> str:
+    """Cevabin altina eklenen kaynak listesi."""
+    satirlar = ["\n📚 Kaynaklar:"]
+    for i, p in enumerate(parcalar, 1):
+        etiket = "  🌐 web kaynaklı" if p["provenance"] == "web_kaynakli" else ""
+        satirlar.append(f"[{i}] {p['path']} ({p['score']:.2f}){etiket}")
+    return "\n".join(satirlar)
+
+async def cmd_sor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Belgelere dayali soru cevaplama.
+
+    UC GUVENLIK KATMANI:
+      1. ARACSIZ: run_model_without_tools kullanilir. Getirilen bir
+         belgedeki enjeksiyon, model bir arac cagrisi uretse bile hicbir
+         seyi calistiramaz -- bu kod yolunda arac yurutme YOKTUR.
+      2. YEREL: Belge icerigi makineden cikmaz. Model yerel degilse
+         istek reddedilir.
+      3. CERCEVE: Parcalar sinirli bloklarda, "veri, talimat degil"
+         uyarisiyla verilir.
+
+    Birincisi asil koruma. Ikinci ve ucuncu derinlemesine savunma --
+    cerceve modelin davranisini etkiler ama garanti etmez; arac
+    yoklugu ise garanti eder.
+    """
+    if not is_authorized(update): return
+    if not check_rate_limit(str(update.effective_user.id)):
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
+        return
+
+    if not memory.is_configured():
+        await update.message.reply_text(_hafiza_kapali_mesaji())
+        return
+
+    soru = " ".join(context.args).strip()
+    if not soru:
+        await update.message.reply_text(
+            "❌ Kullanım: /sor <belgelerine dair soru>\n\n"
+            "Örnek: /sor yerel yapay zeka ajanını neden buluta bağlamadım?"
+        )
+        return
+
+    user_id = str(update.effective_user.id)
+    model = model_for_role("teknik")
+
+    if not is_model_local(model):
+        audit_event("rag_ask_blocked", user_id, f"yerel olmayan model: {model}")
+        await update.message.reply_text(
+            f"❌ /sor yalnızca yerel modelle çalışır; '{model}' yerel değil. "
+            "Belge içeriği makineden çıkmamalı."
+        )
+        return
+
+    audit_event("rag_ask", user_id, soru[:120])
+
+    try:
+        parcalar = await asyncio.to_thread(rag.search, soru, min_skor=rag.RAG_MIN_SCORE)
+    except rag.RagHatasi as e:
+        await update.message.reply_text(f"❌ Arama yapılamadı: {e}")
+        return
+    except memory.MemoryError_ as e:
+        await update.message.reply_text(f"❌ Veritabanı hatası: {e}")
+        return
+
+    if not parcalar:
+        await update.message.reply_text(
+            f"🔎 İndekste bu soruyla yeterince ilgili bir belge bulunamadı "
+            f"(eşik: {rag.RAG_MIN_SCORE:.2f}).\n\n"
+            "Skorlara bakmak için: /bul <aynı soru>"
+        )
+        return
+
+    system_prompt = build_rag_system_prompt(model, _aktif_hatiralar())
+    user_prompt = f"{build_rag_context(parcalar)}\n\nSORU: {soru}"
+
+    cevap, denenen = await asyncio.to_thread(
+        run_model_without_tools, model, user_prompt, system_prompt
+    )
+
+    if not model_ciktisi_kaydedilebilir(cevap):
+        await update.message.reply_text(f"❌ Cevap üretilemedi.\n\n{cevap[:400]}")
+        return
+
+    metin = f"[{model.upper()}]\n{cevap}"
+    if denenen:
+        araclar = ", ".join(sorted(set(denenen)))
+        audit_event("rag_tool_attempt_blocked", user_id, araclar)
+        metin += (
+            f"\n\n🛡️ Model bir araç çağırmaya çalıştı ({araclar}). "
+            "/sor modunda araçlar kapalı; hiçbir şey çalıştırılmadı. "
+            "Kaynaklardan biri gizli talimat içeriyor olabilir."
+        )
+    metin += _sor_kaynaklari(parcalar)
+
+    for i in range(0, len(metin), 3900):
+        await update.message.reply_text(metin[i:i + 3900])
+
 async def cmd_indeksle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """RAG indeksini gunceller.
 
@@ -1486,6 +1586,7 @@ if __name__ == "__main__":
         app.add_handler(CommandHandler("unut", observed_command("unut", cmd_unut)))
         app.add_handler(CommandHandler("indeksle", observed_command("indeksle", cmd_indeksle)))
         app.add_handler(CommandHandler("bul", observed_command("bul", cmd_bul)))
+        app.add_handler(CommandHandler("sor", observed_command("sor", cmd_sor)))
         app.add_handler(CommandHandler("saglik", observed_command("saglik", cmd_saglik)))
         app.add_handler(CommandHandler("istatistik", observed_command("istatistik", cmd_istatistik)))
         app.add_handler(CommandHandler("audit_ozet", observed_command("audit_ozet", cmd_audit_ozet)))

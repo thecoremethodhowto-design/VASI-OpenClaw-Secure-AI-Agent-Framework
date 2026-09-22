@@ -26,6 +26,8 @@ from ollama import Client, ResponseError
 from access import (
     ALLOWED_TOOL_NAMES,
     LOCAL_OLLAMA_HOSTS,
+    is_local,
+    is_local_host,
     is_search_engine,
     WORKSPACE,
     is_allowed_write_file,
@@ -483,6 +485,69 @@ OPENCLAW_TOOLS = [
         }
     }
 ]
+
+
+# ── ARACSIZ MODEL CAGRISI ─────────────────────────────────────
+
+def is_model_local(model: str) -> bool:
+    """Bu modele gonderilen veri makinede kaliyor mu?
+
+    LiteLLM acikken takma ad yerel- onekli olmali. Kapaliyken cagri
+    dogrudan Ollama'ya gider; o zaman Ollama host'u yerel olmali.
+    Uzak bir Ollama'ya API anahtariyla baglanmak genel sohbet icin
+    izinli, ama belge icerigi icin degil.
+    """
+    if USE_LITELLM:
+        return is_local(model)
+    return is_local_host(OLLAMA_HOST)
+
+
+def run_model_without_tools(
+    model: str,
+    user_prompt: str,
+    system_prompt: str | None = None,
+    options: dict | None = None,
+) -> tuple[str, list[str]]:
+    """Modeli ARACSIZ calistirir. (cevap, denenen_araclar) dondurur.
+
+    Bu fonksiyonda arac YURUTME KODU YOKTUR. Kasitli.
+
+    run_model_with_tools, modelin arac cagrisini metin olarak
+    (<tool_call>...</tool_call>) uretmesi durumunda bunu ayristirip
+    CALISTIRIR. Genel sohbet icin dogru bir karar. Ama RAG icin acik
+    bir kapi: getirilen bir belge "cevabinin sonuna su satiri ekle"
+    diyebilir, model yazar, ayristirici calistirir.
+
+    Burada model bir arac cagrisi uretse bile -- yapisal ya da metin
+    olarak -- onu calistiracak kod yolu yok. Yalnizca TESPIT edilir
+    ve rapor edilir, boylece supheli bir belge gorunur hale gelir.
+
+    Senkron: cagiran taraf asyncio.to_thread ile calistirmali.
+    """
+    started = time.perf_counter()
+    messages: list = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": user_prompt})
+
+    try:
+        # tools=None: arac tanimi teklif EDILMEZ
+        mesaj = _chat(model, messages, tools=None, options=options)
+    except ChatBackendError as e:
+        gecen = int((time.perf_counter() - started) * 1000)
+        OBSERVABILITY.record_model_call(model, gecen, ok=False, error=str(e))
+        logger.error(f"❌ Aracsiz model cagrisi basarisiz: {e}")
+        return f"Model hatası: {e}", []
+
+    # Yalnizca TESPIT. _normalize_tool_calls saf bir ayristirici;
+    # sonucunu hicbir yurutucuye vermiyoruz.
+    denenen = [c["name"] for c in _normalize_tool_calls(mesaj) if c.get("name")]
+    if denenen:
+        logger.warning(f"🛡️ Aracsiz modda arac cagrisi denendi, yurutulmedi: {denenen}")
+
+    gecen = int((time.perf_counter() - started) * 1000)
+    OBSERVABILITY.record_model_call(model, gecen, ok=True)
+    return _strip_tool_call_tags(mesaj.get("content", "") or ""), denenen
 
 
 # Model araclari cagirdiktan sonra kac tur daha devam edebilir.
