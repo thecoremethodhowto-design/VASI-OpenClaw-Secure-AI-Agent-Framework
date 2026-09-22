@@ -445,7 +445,7 @@ def build_security_report() -> str:
 2. Kırmızı takım değerlendirmesi yap: testler kontrollerin yazıldığı gibi çalıştığını doğrular.
 3. Hafıza türlerini ayrıştır: şema `fact` ve `context` türlerini tanımlıyor ama hepsi `preference` olarak yazılıyor.
 4. RAG benzerlik eşiği (`RAG_MIN_SCORE`) tek bir veri kümesine göre seçildi; içerik değişirse ayarlanmalı.
-5. Sovereign / Denetçi katmanı: bağımsız bir denetim mekanizması..
+5. Sovereign / Denetçi katmanı: bağımsız bir denetim mekanizması.
 ## Not
 Bu rapor model tarafından tahmin edilmez; mevcut kod sabitlerinden ve güvenlik ayarlarından üretilir.
 Yukarıdaki iyileştirme listesi elle güncellenir.
