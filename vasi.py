@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 import difflib
@@ -112,6 +113,9 @@ from execution import (
 # ── MEMORY KATMANI ────────────────────────────────────────────────────────────
 import memory
 
+# ── RAG KATMANI ───────────────────────────────────────────────────────────────
+import rag
+
 # ── DECISION KATMANI (DACE) ───────────────────────────────────────────────────
 import decision
 from decision import (
@@ -218,7 +222,7 @@ Komutlar:
 /kod_patch <istek> - Uygulanabilir patch taslağı üretir (dosya yazmaz)
 /guvenlik - Mevcut güvenlik kontrollerini deterministik raporlar
 /siniflandir <dosya> - Dosyanın veri sınıfını ve Gemini aktarım iznini gösterir
-/temizle - Konuşma geçmişini sıfırlar\n/hatirla <bilgi> - Kalıcı bir hatıra kaydeder (onay ister)\n/hatirlananlar - Kayıtlı hatıraları listeler\n/unut <numara> - Bir hatırayı pasifleştirir (onay ister)
+/temizle - Konuşma geçmişini sıfırlar\n/hatirla <bilgi> - Kalıcı bir hatıra kaydeder (onay ister)\n/hatirlananlar - Kayıtlı hatıraları listeler\n/unut <numara> - Bir hatırayı pasifleştirir (onay ister)\n/indeksle - Belgeleri RAG indeksine ekler (politikanın izin verdikleri)\n/bul <sorgu> - İndekste anlamsal arama (model kullanmaz)
 /saglik - Bileşen sağlık durumunu gösterir
 /istatistik - Komut, hata ve model kullanım özetini gösterir
 /audit_ozet - Son olay ve audit özetini gösterir
@@ -474,6 +478,11 @@ def _aktif_hatiralar() -> list[str]:
         logger.warning(f"⚠️ Hatiralar okunamadi: {e}")
         return []
 
+def build_rag_health() -> HealthCheck:
+    """RAG indeksinin durumunu HealthCheck'e cevirir."""
+    durum, detay = rag.health()
+    return HealthCheck("RAG", durum, details=detay)
+
 def build_memory_health() -> HealthCheck:
     """Hafiza katmaninin durumunu HealthCheck'e cevirir."""
     durum, detay = memory.health()
@@ -486,7 +495,7 @@ def build_health_report() -> str:
         workspace_health(WORKSPACE),
         skills_health(WORKSPACE),
         build_memory_health(),
-        HealthCheck("RAG", "warn", details="henüz kurulmadı"),
+        build_rag_health(),
     ]
     return format_health_report(checks, OBSERVABILITY.last_command_summary())
 
@@ -1018,6 +1027,115 @@ async def cmd_unut(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(preview, reply_markup=keyboard)
 
+def _indeks_raporu(r: dict) -> str:
+    """index_workspace sonucunu okunur metne cevirir."""
+    satirlar = ["📚 İndeksleme tamamlandı\n"]
+    satirlar.append(f"Yeni / değişen: {r['yeni']} dosya, {r['parca']} parça")
+    if r["web"]:
+        satirlar.append(f"  └ bunlardan web kaynaklı: {r['web']} dosya")
+    satirlar.append(f"Değişmeyen (atlandı): {r['degismeyen']} dosya")
+    if r["silinen"]:
+        satirlar.append(f"İndeksten kaldırılan: {r['silinen']} dosya")
+    if r["okunamayan"]:
+        satirlar.append(f"Okunamayan: {len(r['okunamayan'])} dosya")
+    satirlar.append("\nYalnızca politikanın izin verdiği sınıflar tarandı.")
+    return "\n".join(satirlar)
+
+def _bul_sonucu(sorgu: str, sonuclar: list[dict]) -> str:
+    """Arama sonuclarini okunur metne cevirir."""
+    if not sonuclar:
+        return (
+            f'🔎 "{sorgu}" için sonuç bulunamadı.\n\n'
+            "İndeks boş olabilir: /indeksle"
+        )
+    satirlar = [f'🔎 "{sorgu}" için {len(sonuclar)} sonuç\n']
+    for i, s in enumerate(sonuclar, 1):
+        etiket = "  🌐 web kaynaklı" if s["provenance"] == "web_kaynakli" else ""
+        ozet = " ".join(s["content"].split())[:180]
+        satirlar.append(
+            f"{i}. {s['path']} — benzerlik {s['score']:.2f}{etiket}\n   {ozet}…\n"
+        )
+    satirlar.append("Model kullanılmadı; sonuçlar doğrudan indeksten geliyor.")
+    return "\n".join(satirlar)
+
+async def cmd_bul(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Anlamsal arama. MODEL KULLANMAZ.
+
+    Getirilen metin yalnizca kullaniciya gosterilir. Bu yuzden bu
+    komutta enjeksiyon riski yoktur -- ve kullanici indekste ne
+    oldugunu kendi gozuyle gorebilir.
+    """
+    if not is_authorized(update): return
+    if not check_rate_limit(str(update.effective_user.id)):
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
+        return
+
+    if not memory.is_configured():
+        await update.message.reply_text(_hafiza_kapali_mesaji())
+        return
+
+    sorgu = " ".join(context.args).strip()
+    if not sorgu:
+        await update.message.reply_text(
+            "❌ Kullanım: /bul <aranacak şey>\n\n"
+            "Örnek: /bul tedarik zinciri saldırıları"
+        )
+        return
+
+    user_id = str(update.effective_user.id)
+    audit_event("rag_search", user_id, sorgu[:120])
+
+    try:
+        sonuclar = await asyncio.to_thread(rag.search, sorgu, dosya_basina_tek=True)
+    except rag.RagHatasi as e:
+        await update.message.reply_text(f"❌ Arama yapılamadı: {e}")
+        return
+    except memory.MemoryError_ as e:
+        await update.message.reply_text(f"❌ Veritabanı hatası: {e}")
+        return
+
+    await update.message.reply_text(_bul_sonucu(sorgu, sonuclar))
+
+async def cmd_indeksle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """RAG indeksini gunceller.
+
+    Onay istemez: yalnizca politikanin ZATEN izin verdigi dosyalari
+    isler ve /sor arac cagiramadigi icin riski sinirlidir. Ama her
+    calisma denetim izine yazilir.
+
+    Tarama ayri bir is parcaciginda calisir. Embedding dakikalar
+    surebilir; ana dongude calissaydi bot o sure boyunca donardi.
+    """
+    if not is_authorized(update): return
+    if not check_rate_limit(str(update.effective_user.id)):
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
+        return
+
+    if not memory.is_configured():
+        await update.message.reply_text(_hafiza_kapali_mesaji())
+        return
+
+    user_id = str(update.effective_user.id)
+    audit_event("rag_index_start", user_id, "-")
+    await update.message.reply_text("📚 İndeksleniyor... Bu birkaç dakika sürebilir.")
+
+    try:
+        rapor = await asyncio.to_thread(rag.index_workspace)
+    except rag.RagHatasi as e:
+        audit_event("rag_index_failed", user_id, str(e)[:120])
+        await update.message.reply_text(f"❌ İndeksleme durdu: {e}")
+        return
+    except memory.MemoryError_ as e:
+        audit_event("rag_index_failed", user_id, str(e)[:120])
+        await update.message.reply_text(f"❌ Veritabanı hatası: {e}")
+        return
+
+    audit_event(
+        "rag_index_done", user_id,
+        f"yeni={rapor['yeni']} parca={rapor['parca']} silinen={rapor['silinen']}",
+    )
+    await update.message.reply_text(_indeks_raporu(rapor))
+
 async def cmd_temizle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Konusma gecmisini sifirlar. Konu degistirirken kullanilir."""
     if not is_authorized(update): return
@@ -1334,6 +1452,10 @@ if __name__ == "__main__":
                 memory.init_schema()
             except memory.MemoryError_ as e:
                 logger.warning(f"⚠️ Hafiza semasi kurulamadi: {e}")
+            try:
+                rag.init_schema()
+            except memory.MemoryError_ as e:
+                logger.warning(f"⚠️ RAG semasi kurulamadi: {e}")
         else:
             logger.info("💤 Hafiza kapali (POSTGRES_PASSWORD yok)")
 
@@ -1362,6 +1484,8 @@ if __name__ == "__main__":
         app.add_handler(CommandHandler("hatirla", observed_command("hatirla", cmd_hatirla)))
         app.add_handler(CommandHandler("hatirlananlar", observed_command("hatirlananlar", cmd_hatirlananlar)))
         app.add_handler(CommandHandler("unut", observed_command("unut", cmd_unut)))
+        app.add_handler(CommandHandler("indeksle", observed_command("indeksle", cmd_indeksle)))
+        app.add_handler(CommandHandler("bul", observed_command("bul", cmd_bul)))
         app.add_handler(CommandHandler("saglik", observed_command("saglik", cmd_saglik)))
         app.add_handler(CommandHandler("istatistik", observed_command("istatistik", cmd_istatistik)))
         app.add_handler(CommandHandler("audit_ozet", observed_command("audit_ozet", cmd_audit_ozet)))

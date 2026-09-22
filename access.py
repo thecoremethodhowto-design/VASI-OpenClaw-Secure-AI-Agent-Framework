@@ -175,9 +175,21 @@ def _load_classification_policy() -> dict:
         return {}
 
 
+# Bir dosya birden fazla desene uyabilir: projeler/.env hem "projeler/**"
+# (PROJECT) hem "**/.env*" (SECRET) ile eslesir. EN KISITLAYICI SINIF
+# KAZANIR -- YAML dosyasindaki sira DEGIL, bu sira gecerlidir.
+#
+# Bu kural uzun sure eksikti ve fark edilmedi: tum siniflarda
+# gemini_allowed: false oldugu icin yanlis siniflandirmanin hicbir
+# etkisi yoktu. RAG, siniflandirmanin davranisi gercekten degistirdigi
+# ilk ozellik -- ve projeler/.env dosyasi PROJECT sayilip indekslenecekti.
+SINIF_ONCELIGI = ("SECRET", "PRIVATE", "PROJECT", "PUBLIC")
+
+
 def classify_file(filepath: str | Path) -> str:
     """
     Dosya yoluna göre sınıf döndürür: PUBLIC, PRIVATE, PROJECT, SECRET.
+    Birden fazla desen eşleşirse EN KISITLAYICI sınıf döner.
     Eşleşme yoksa policy'deki varsayılan (PRIVATE) döner.
     """
     policy  = _load_classification_policy()
@@ -194,8 +206,13 @@ def classify_file(filepath: str | Path) -> str:
         rel = str(path).replace("\\", "/")
 
     import fnmatch
-    for classification, globs in patterns.items():
-        for pattern in globs:
+    # Bilinen siniflar kisitlayicidan gevsege; bilinmeyenler sonda.
+    # (Bilinmeyen bir sinif eklenirse test_politika_siniflari_tanimli kirilir.)
+    sira = [s for s in SINIF_ONCELIGI if s in patterns]
+    sira += [s for s in patterns if s not in SINIF_ONCELIGI]
+
+    for classification in sira:
+        for pattern in patterns[classification]:
             if fnmatch.fnmatch(rel, pattern):
                 return classification
 
@@ -208,6 +225,18 @@ def is_gemini_allowed(filepath: str | Path) -> bool:
     classification = classify_file(filepath)
     classes        = policy.get("classifications", {})
     return classes.get(classification, {}).get("gemini_allowed", False)
+
+def is_rag_allowed(filepath: str | Path) -> bool:
+    """Bu dosya RAG indeksine girebilir mi?
+
+    Varsayilan HAYIR: politika okunamazsa ya da alan tanimli degilse
+    dosya indekslenmez.
+    """
+    policy         = _load_classification_policy()
+    classification = classify_file(filepath)
+    classes        = policy.get("classifications", {})
+    return classes.get(classification, {}).get("rag_allowed", False) is True
+
 
 def classification_report_line(filepath: str | Path) -> str:
     classification = classify_file(filepath)
@@ -280,6 +309,19 @@ def is_safe_url(url: str) -> bool:
     except Exception as e:
         logger.error(f"URL doğrulama hatası: {e}")
         return False
+
+# ── YEREL HOST TANIMI ──────────────────────────────────────────
+
+# "Bu host yerel mi?" bir erisim sorusudur. Hem model istemcisi
+# (execution.py) hem embedding (rag.py) bu kumeye bakar. Tek yerde
+# durur ki biri guncellendiginde digeri geride kalmasin.
+LOCAL_OLLAMA_HOSTS = {"localhost", "127.0.0.1", "::1", "host.docker.internal", "ollama"}
+
+
+def is_local_host(url: str) -> bool:
+    """Bu adres makinenin kendisini mi gosteriyor?"""
+    return (urlparse(url).hostname or "") in LOCAL_OLLAMA_HOSTS
+
 
 # ── MODEL GIZLILIK PROFILI ──────────────────────────────────────
 

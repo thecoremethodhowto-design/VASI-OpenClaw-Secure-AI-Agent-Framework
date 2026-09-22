@@ -25,6 +25,7 @@ from ollama import Client, ResponseError
 
 from access import (
     ALLOWED_TOOL_NAMES,
+    LOCAL_OLLAMA_HOSTS,
     is_search_engine,
     WORKSPACE,
     is_allowed_write_file,
@@ -312,7 +313,6 @@ OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")
 # Uzak bir Ollama sunucusuna anahtarsiz baglanmayi engelle.
 # Bu dogrulama istemcinin YANINDA durur: kontrol ile korudugu sey
 # ayni yerde olsun ki biri digeri olmadan tasinamasin.
-LOCAL_OLLAMA_HOSTS = {"localhost", "127.0.0.1", "::1", "host.docker.internal", "ollama"}
 _ollama_hostname = urlparse(OLLAMA_HOST).hostname or ""
 if not OLLAMA_API_KEY and _ollama_hostname not in LOCAL_OLLAMA_HOSTS:
     raise ValueError("❌ Uzak Ollama sunucusu için OLLAMA_API_KEY zorunludur!")
