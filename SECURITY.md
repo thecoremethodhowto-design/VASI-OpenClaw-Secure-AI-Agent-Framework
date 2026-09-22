@@ -36,6 +36,7 @@ varsayıma göre tasarlanmıştır.
 - Hassas verinin dış servislere sızması
 - Model yönlendirme: hangi verinin hangi sağlayıcıya gittiği
 - Hafıza bütünlüğü: bir hatıranın kaynağı ve prompta girip girmediği
+- Dolaylı enjeksiyon: indekslenmiş bir belgedeki gizli talimatın etkisi
 
 **Kapsam dışında:**
 - Çok kullanıcılı erişim kontrolü
@@ -74,6 +75,10 @@ dayanır:
 10. **Kaynak etiketi koddan gelir** — Bir hatıranın nereden geldiğini
     kod belirler, model değil. Hafızaya yazma, dosya yazma kadar ciddi
     bir işlemdir ve aynı onay mekanizmasından geçer.
+11. **Yeteneği yasaklamak yerine hiç yazmamak** — Güvenilmeyen içeriğin
+    modele ulaştığı yerlerde (RAG), araç çağrısı "yasak" değildir;
+    çalıştıracak kod yolu yoktur. Bir kısıtlamayı unutmak mümkündür,
+    var olmayan bir kod yolunu çağırmak değildir.
 
 Her ilkenin koddaki tam karşılığı, ilgili testleri ve bilinen eksikleri
 için: **[THREAT-MAPPING.md](THREAT-MAPPING.md)**
@@ -109,6 +114,10 @@ yapılandırma değerlerinden okunur.
   saldırgana karşı yeterli olduğunu değil
 - Log rotasyonu uygulanmamıştır
 - Hafıza türleri ayrıştırılmıyor; tüm kayıtlar `preference` olarak saklanıyor
+- RAG çerçevelemesi modelin davranışını etkiler ama garanti etmez;
+  asıl koruma `/sor` kod yolunda araç yürütme bulunmamasıdır
+- Benzerlik eşiği (`RAG_MIN_SCORE`) tek bir veri kümesinde gözlemlenen
+  skorlara göre seçildi; farklı içerikte ayarlanması gerekebilir
 - `/unut` bir hatırayı pasifleştirir, ancak o hatıra son turlarda
   konuşulduysa model onu hâlâ konuşma geçmişinde görebilir
 - LiteLLM proxy'si ayrı bir bağımlılıktır; Mart 2026'da tedarik zinciri
@@ -133,6 +142,8 @@ Bu sistem, çalıştıran kişinin şu önlemleri almasını varsayar:
 - `LITELLM_MASTER_KEY` rastgele üretilmelidir (`openssl rand -hex 32`)
 - `POSTGRES_PASSWORD` rastgele üretilmelidir (`openssl rand -hex 24`);
   boş bırakılırsa kalıcı hafıza kapalı kalır
+- `/indeksle` çalıştırmadan önce `policies/data_classification.yaml`
+  gözden geçirilmelidir; indekslenen her dosya `/bul` ile aranabilir olur
 - LiteLLM ve PostgreSQL sürümleri yükseltilmeden önce güvenlik
   duyuruları kontrol edilmelidir; yeni yayınlanmış sürümler hemen
   alınmamalıdır

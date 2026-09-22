@@ -33,6 +33,7 @@ Bu depodaki her guvenlik kontrolu, belirli bir tehdit sinifinin analizinden cika
 - Veri siniflandirma politikasi (`PUBLIC`, `PRIVATE`, `PROJECT`, `SECRET`)
 - Konusma gecmisi (son 10 tur) ve `/temizle`
 - PostgreSQL kalici hafiza: `/hatirla`, `/hatirlananlar`, `/unut`
+- Belge arama (RAG): `/indeksle`, `/bul`, `/sor` -- yerel embedding, aracsiz cevaplama
 - Deterministik `/guvenlik` raporu
 - Gozlemlenebilirlik: `/saglik`, `/istatistik`, `/audit_ozet`
 - Gemini API ile kaynakli internet arastirmasi
@@ -65,6 +66,9 @@ VASI'nin temel guvenlik prensibi: model onerir, kritik islemler kullanici onayi 
 - Hafiza butunlugu: model kendi basina hatirlayamaz; kayit icin acik komut ve onay gerekir. Kaynak etiketini KOD atar -- `remember()` imzasinda `source` parametresi yoktur.
 - Hafiza filtresi: yalnizca `source='user'` kayitlari sistem promptuna girer.
 - Silme yerine pasiflestirme: `/unut` kaydi silmez, `active=false` yapar; denetim izi korunur.
+- RAG aracsiz calisir: `/sor` sirasinda model arac CAGIRAMAZ. Getirilen bir belgedeki gizli talimat cevabi etkileyebilir ama dis dunyaya ulasamaz.
+- RAG yerel kalir: `/sor` yalnizca yerel modelle calisir; embedding yalnizca yerel host'ta yapilir.
+- Siniflandirmada en kisitlayici sinif kazanir: `projeler/.env` PROJECT degil SECRET'tir, indekslenmez.
 - Taninmayan komutlar modele dusmez; `/hatırla` gibi Turkce karakterli yazimlar yakalanir ve dogru komut onerilir.
 - `.env` Git ve Docker build baglamindan dislanir.
 
@@ -120,6 +124,38 @@ eder.
 
 Yeni bir model eklerken `litellm/config.yaml` icinde onek kuralina
 uyun; uymayan bir takma ad mimari testte yakalanir.
+
+## Belge Arama (RAG)
+
+Uc komut var ve ucu de acik kullanici eylemi gerektirir. Duz sohbette
+otomatik arama YOKTUR.
+
+```text
+/indeksle          Politikanin izin verdigi belgeleri indeksler
+/bul <sorgu>       Anlamsal arama -- MODEL KULLANMAZ
+/sor <soru>        Belgelere dayali cevap -- YEREL model, ARACSIZ
+```
+
+Hangi dosyalarin indekslenecegini `policies/data_classification.yaml`
+belirler. Su an `youtube/`, `arastirma/`, `projeler/` ve `README*`
+indekslenir; `notlar/`, gizli dosyalar ve siniflandirilmamis her sey
+disarida kalir.
+
+**Neden `/sor` aracsiz calisir:** Getirilen belgeler guvenilmeyen icerik
+tasiyabilir -- ornegin `/ara_senaryo` ile uretilmis bir dosya, web'den
+derlenmis metin icerir. O metinde gizli bir talimat varsa cevabi
+etkileyebilir. Ama `/sor`'un kod yolunda arac yurutme bulunmadigi icin
+dis dunyaya ulasamaz.
+
+Web kaynakli icerik dislanmaz, ETIKETLENIR: `/bul` ve `/sor`
+sonuclarinda 🌐 isaretiyle gorunur.
+
+**Embedding modeli:** `bge-m3` (yerel, Ollama uzerinden). Turkce erisim
+karsilastirmalarinda en yuksek skoru veren cok dilli model. Kurulum:
+
+```bash
+ollama pull bge-m3
+```
 
 ## Kurulum
 
@@ -244,6 +280,7 @@ Not: `down --volumes` compose volume verilerini de siler.
 ├── vasi.py                  # Telegram + orkestrasyon
 ├── decision.py              # DACE: ne yapilmali?
 ├── memory.py                # kalici hafiza (PostgreSQL)
+├── rag.py                   # belge arama (parcalama, embedding, arama)
 ├── access.py                # DACE: izin var mi?
 ├── context.py               # DACE: model neyi bilmeli?
 ├── execution.py             # DACE: simdi yap
@@ -270,6 +307,7 @@ Not: `down --volumes` compose volume verilerini de siler.
 │   ├── test_history.py          # konusma gecmisi
 │   ├── test_memory.py           # kalici hafiza + kaynak etiketi
 │   ├── test_unknown_command.py  # taninmayan komut yakalama
+│   ├── test_rag.py              # indeksleme, arama, enjeksiyon korumasi
 │   ├── test_security_core.py
 │   ├── test_observability.py
 │   └── test_degisiklikler.py

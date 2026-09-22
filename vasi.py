@@ -384,6 +384,12 @@ def build_security_report() -> str:
         if not memory.is_configured()
         else f"Açık; yalnızca {'/'.join(memory.PROMPTA_GIREBILEN)} kaynaklı kayıtlar sistem promptuna girer."
     )
+    rag_durum, rag_detay = rag.health()
+    rag_state = (
+        f"{rag_detay}; arama yalnizca /bul ve /sor ile, otomatik arama yok."
+        if rag_durum == "ok"
+        else f"{rag_detay} (indeks yok)"
+    )
     litellm_state = (
         f"LiteLLM proxy aktif ({LITELLM_BASE_URL}); model çağrıları takma adlar üzerinden yönlendirilir."
         if USE_LITELLM
@@ -421,6 +427,13 @@ def build_security_report() -> str:
 - Hafıza kaynak etiketi: `remember()` imzasında `source` parametresi yoktur; kod her zaman `user` yazar.
 - Hafıza silme: `/unut` kaydı silmez, `active=false` yapar; denetim izi korunur.
 - Bilinmeyen komut koruması: Tanınmayan `/` komutları modele düşmez; doğru komut önerilir.
+- RAG indeksi: {rag_state}
+- RAG araç yalıtımı: `/sor` sırasında model araç ÇAĞIRAMAZ; `run_model_without_tools()` içinde araç yürütme kodu yoktur. Deneme tespit edilip kullanıcıya bildirilir.
+- RAG model sınırı: `/sor` yalnızca yerel modelle çalışır; `is_model_local()` aramadan önce kontrol edilir.
+- RAG embedding sınırı: Vektör üretimi yalnızca yerel host'ta; uzak adrese istek atılmaz.
+- RAG politika filtresi: İndeksleme ve arama, her ikisinde de `rag_allowed` kontrol edilir; politika değişirse eski parçalar aramada çıkmaz.
+- RAG köken etiketi: Web aramasından üretilen dosyalar `web_kaynakli` işaretlenir ve sonuçlarda görünür.
+- Sınıflandırma önceliği: Birden fazla desene uyan dosyada en kısıtlayıcı sınıf kazanır (`SINIF_ONCELIGI`).
 - Docker hardening: `read_only`, `tmpfs /tmp`, `no-new-privileges`, `cap_drop: ALL` compose dosyasında tanımlı.
 - Sır koruması: `.env` git/docker ignore içinde; loglarda `httpx` Telegram URL logları susturuldu.
 - Audit izi: Hassas içerik maskeleyen `AUDIT` satırları tutulur.
@@ -431,7 +444,8 @@ def build_security_report() -> str:
 1. Audit satırlarını merkezi bir log sistemine yönlendir (şu an yerel dosyada).
 2. Kırmızı takım değerlendirmesi yap: testler kontrollerin yazıldığı gibi çalıştığını doğrular.
 3. Hafıza türlerini ayrıştır: şema `fact` ve `context` türlerini tanımlıyor ama hepsi `preference` olarak yazılıyor.
-4. RAG: `rag_allowed` alanı policy dosyasında tanımlı ama henüz kullanılmıyor.
+4. RAG benzerlik eşiği (`RAG_MIN_SCORE`) tek bir veri kümesine göre seçildi; içerik değişirse ayarlanmalı.
+5. Sovereign / Denetçi katmanı: bağımsız bir denetim mekanizması..
 ## Not
 Bu rapor model tarafından tahmin edilmez; mevcut kod sabitlerinden ve güvenlik ayarlarından üretilir.
 Yukarıdaki iyileştirme listesi elle güncellenir.
