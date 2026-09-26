@@ -35,6 +35,7 @@ Bu depodaki her guvenlik kontrolu, belirli bir tehdit sinifinin analizinden cika
 - PostgreSQL kalici hafiza: `/hatirla`, `/hatirlananlar`, `/unut`
 - Belge arama (RAG): `/indeksle`, `/bul`, `/sor` -- yerel embedding, aracsiz cevaplama
 - Deterministik `/guvenlik` raporu
+- Sapma denetcisi: `/denetle` -- kod, politika ve yapilandirma uyumu; sapma bulunca ilgili yetenegi kapatir
 - Gozlemlenebilirlik: `/saglik`, `/istatistik`, `/audit_ozet`
 - Gemini API ile kaynakli internet arastirmasi
 - Docker hardening: read-only filesystem, tmpfs, no-new-privileges, cap_drop
@@ -70,6 +71,10 @@ VASI'nin temel guvenlik prensibi: model onerir, kritik islemler kullanici onayi 
 - RAG yerel kalir: `/sor` yalnizca yerel modelle calisir; embedding yalnizca yerel host'ta yapilir.
 - Siniflandirmada en kisitlayici sinif kazanir: `projeler/.env` PROJECT degil SECRET'tir, indekslenmez.
 - Taninmayan komutlar modele dusmez; `/hatırla` gibi Turkce karakterli yazimlar yakalanir ve dogru komut onerilir.
+- Sapma denetcisi: `/denetle` on kontrolu calistirir. Deterministik ve kritik bir bulgu ilgili yetenegi kapatir; sezgisel bir bulgu yalnizca raporlar.
+- Yetenek kapatma dar kapsamlidir: sapma hangi yetenegi etkiliyorsa yalnizca o kapanir (`rag`, `hafiza_prompt`, `araclar`).
+- Kapatma geri alinabilir ama SURELIDIR: `/gecersiz_kil` onay ister, denetim gunlugune yazilir ve varsayilan 30 dakika sonra kendiliginden kalkar.
+- `sovereign.py` hicbir yerel modulu import etmez; denetledigi sabitler ona parametre olarak gider. Bozulan bir modul denetciyi susturamaz.
 - `.env` Git ve Docker build baglamindan dislanir.
 
 VASI, DACE mimarisiyle dort katmana ayrilmistir: `decision.py` (ne
@@ -150,6 +155,11 @@ dis dunyaya ulasamaz.
 Web kaynakli icerik dislanmaz, ETIKETLENIR: `/bul` ve `/sor`
 sonuclarinda 🌐 isaretiyle gorunur.
 
+Siniflandirma politikasi ile kod arasindaki uyum `/denetle` ile
+sinanir. Politikada tanimli olup kodun oncelik listesinde bulunmayan
+bir sinif, ya da daha kisitlayici bir sinifin daha fazla izne sahip
+olmasi, RAG yetenegini kapatir.
+
 **Embedding modeli:** `bge-m3` (yerel, Ollama uzerinden). Turkce erisim
 karsilastirmalarinda en yuksek skoru veren cok dilli model. Kurulum:
 
@@ -183,6 +193,7 @@ VASI_MODEL_GORSEL=qwen3:30b
 GEMINI_API_KEY=Gemini_API_keyiniz
 GEMINI_MODEL=gemini-2.5-flash
 PENDING_ACTION_TTL_SECONDS=600
+SOVEREIGN_OVERRIDE_TTL_SECONDS=1800
 USE_LITELLM=true
 LITELLM_BASE_URL=http://litellm:4000
 LITELLM_MASTER_KEY=openssl_rand_hex_32_ile_uretin
@@ -220,6 +231,8 @@ docker compose logs -f vasi-core
 /kod teknik soru
 /kod_patch degisiklik istegi
 /guvenlik
+/denetle
+/gecersiz_kil rag
 /siniflandir notlar/NOTES.md
 /saglik
 /istatistik
@@ -262,6 +275,10 @@ docker run --rm -v "$(pwd)":/work -w /work python:3.11-slim \
 5. `/ara_ozet <konu>` kaynakli kisa arastirma uretiyor mu?
 6. `/ara_senaryo <konu>` onayli senaryo dosyasi olusturuyor mu?
 7. `/kod_patch <istek>` dosya yazmadan patch taslagi uretiyor mu?
+8. `/denetle` temiz rapor donuyor mu? (10 kontrol)
+9. `policies/data_classification.yaml` dosyasina kodda tanimsiz bir sinif ekleyip
+   yeniden kurun: `/denetle` sapmayi bulmali ve `/bul` reddetmeli. Sinifi silip
+   tekrar `/denetle` calistirin -- yetenek kendiliginden acilmali.
 
 ## 3 Komutluk Demo (Durdur / Kaldir / Tekrar Kur)
 
@@ -281,6 +298,8 @@ Not: `down --volumes` compose volume verilerini de siler.
 ├── decision.py              # DACE: ne yapilmali?
 ├── memory.py                # kalici hafiza (PostgreSQL)
 ├── rag.py                   # belge arama (parcalama, embedding, arama)
+├── sovereign.py             # sapma denetcisi (yerel import YOK)
+├── sovereign_store.py       # denetim izi (PostgreSQL)
 ├── access.py                # DACE: izin var mi?
 ├── context.py               # DACE: model neyi bilmeli?
 ├── execution.py             # DACE: simdi yap
@@ -308,6 +327,7 @@ Not: `down --volumes` compose volume verilerini de siler.
 │   ├── test_memory.py           # kalici hafiza + kaynak etiketi
 │   ├── test_unknown_command.py  # taninmayan komut yakalama
 │   ├── test_rag.py              # indeksleme, arama, enjeksiyon korumasi
+│   ├── test_sovereign.py        # sapma denetcisi, yetenek kapisi, parmak izi
 │   ├── test_security_core.py
 │   ├── test_observability.py
 │   └── test_degisiklikler.py

@@ -26,6 +26,8 @@ COPY execution.py .
 COPY decision.py .
 COPY memory.py .
 COPY rag.py .
+COPY sovereign.py .
+COPY sovereign_store.py .
 COPY litellm ./litellm
 
 # Security: Non-root user oluştur

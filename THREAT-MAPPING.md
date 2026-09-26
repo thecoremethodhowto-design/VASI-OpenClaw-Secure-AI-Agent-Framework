@@ -26,6 +26,7 @@ bağlar.
 | 10 | Zehirli Hafıza | Bir hatıranın kaynağı belli olsun | Kaynak etiketi + onay kapısı | ✅ |
 | 11 | Sessiz Komut Düşüşü | Tanınmayan komut modele gitmesin | Bilinmeyen komut yakalayıcı | ✅ |
 | 12 | Dolaylı Enjeksiyon | Belge içeriği dış dünyaya ulaşamasın | Araçsız erişim + yerel model | ✅ |
+| 13 | Sessiz Yapılandırma Sapması | Sistem, yaptığını söylediği şeyi hâlâ yapmalı | Sapma denetçisi + yetenek kapatma | ✅ |
 
 **Test durumu:** ✅ birim testi var · ◐ kısmen · ⚙️ yapılandırma (birim
 testi uygun değil) · ❌ test yok
@@ -50,6 +51,12 @@ vasi.py        Telegram + orkestrasyon
 `context.py` hatıraları **kendisi okumaz** — çağıran taraf getirip
 parametre olarak verir. Böylece Context katmanı veritabanına bağımlı
 olmaz ve PostgreSQL olmadan test edilebilir.
+
+`sovereign.py` aynı kuralı bir adım ileri götürür: **hiçbir yerel
+modülü import etmez.** Denetlediği her sabit ona anlık görüntü sözlüğü
+olarak parametreyle gider. Bozulan bir modül denetçiyi de susturamaz,
+ve denetim mantığı PostgreSQL olmadan test edilebilir. Kalıcılık ayrı
+bir dosyada (`sovereign_store.py`) durur; bir test bu sınırı zorlar.
 
 Model çağrıları LiteLLM proxy'si üzerinden geçer. Takma adlar verinin
 nereye gittiğini söyler ve bu kural test edilir:
@@ -593,13 +600,262 @@ talimata uyarsa, tek fark eden şey birinci katman olacaktır.
 
 ---
 
+## 13. Sessiz Yapılandırma Sapması → Sapma Denetçisi
+
+**İlke:** Bir sistemin yaptığını söylediği şeyi hâlâ yapıp yapmadığı,
+çalışırken doğrulanabilmeli.
+
+**Neden:** Testler kodu doğrular — siz çalıştırdığınızda. Ama güvenlik
+açıkları çoğu zaman eksik araçlardan değil, **erken yazılıp sonra hiç
+güncellenmeyen yapılandırmalardan** çıkar. Kod ilerler, politika yerinde
+kalır; ikisinin arası sessizce açılır.
+
+Bu projede tam olarak üç kez yaşandı:
+
+| Ne oldu | Neden fark edilmedi |
+|---|---|
+| Sınıflandırma sırası aylarca yanlıştı | Tüm sınıflarda `gemini_allowed: false` idi; yanlış sınıflandırmanın etkisi yoktu |
+| `init_schema()` yazıldı, hiçbir yerden çağrılmadı | Hata ancak ilk gerçek kullanımda çıktı |
+| Dokuz komut model gateway'ini atlıyordu | Yanıtlar doğru görünüyordu |
+
+Üçü de aynı sınıf: **sistem, yaptığını söylediği şeyi yapmıyordu.**
+
+### Kontrol türü — bu ayrım her şeyi belirler
+
+```
+DETERMİNİSTİK bir kontrol bir OLGU söyler:
+    "Araç listesinde politikada olmayan bir isim var."
+  Doğru ya da yanlış. Tartışma yok. Durdurabilir.
+
+SEZGİSEL bir kontrol bir TAHMİN söyler:
+    "Bu kullanım örüntüsü olağandışı görünüyor."
+  Haklı olabilir, olmayabilir. YALNIZCA raporlar.
+```
+
+Sezgisel bir kontrol durdurursa, yanlış alarm operatörü kendi
+sisteminden kilitler. Ve bir-iki yanlış alarmdan sonra insanlar
+kontrolü kapatır. **Kapalı bir kontrol, olmayan bir kontroldür.**
+
+### Durdurma kuralı — üç koşul, üçü de gerekli
+
+Bir bulgunun yetenek kapatabilmesi için:
+
+1. **Deterministik** olmalı — bir tahmin yetenek kapatamaz
+2. **Kritik** olmalı — geri alınabilir bir sorun için durdurmaya değmez
+3. **Kapatılacak bir yetenek** göstermeli
+
+Önem dereceleri geri alınabilirliğe göre ayrılır: `KRİTİK` geri
+alınamaz bir şey olabileceği anlamına gelir (sızan bir anahtar geri
+gelmez), `UYARI` zararı geri alınabilir, `BİLGİ` kayda değer ama
+zararsız.
+
+### On kontrol
+
+| Kontrol | Tür | Ne sorar |
+|---|---|---|
+| `politika_kod_uyumu` | det. | Politikadaki her sınıf `SINIF_ONCELIGI`'nde var mı? |
+| `politika_izin_mantigi` | det. | Daha kısıtlayıcı bir sınıf daha fazla izne sahip mi? |
+| `sinif_alanlari` | det. | Bir sınıf tanımında beklenmeyen anahtar var mı? |
+| `arac_listesi` | det. | Modele sunulan araçlar izin listesiyle birebir mi? |
+| `hafiza_kaynak_filtresi` | det. | Prompta yalnızca `user` kaynaklı hatıralar mı giriyor? |
+| `rag_arac_yalitimi` | det. | Araçsız kod yoluna araç yürütme sızmış mı? |
+| `onay_kapilari` | det. | Kalıcı etkisi olan her komut onay istiyor mu? |
+| `rag_izni_tanimli` | det. | Her sınıfın `rag_allowed` alanı açıkça yazılmış mı? |
+| `zaman_sapmasi` | det. | Geçen denetimden bu yana ne değişti? |
+| `hata_orani` | **sez.** | Komut hata oranı olağandışı yüksek mi? |
+
+**Tasarım notu — iki politika kontrolünün farkı:** `politika_kod_uyumu`
+**yapıya** bakar, `politika_izin_mantigi` **anlama**. `SECRET` sınıfının
+`rag_allowed` değeri `true` yapılırsa yapısal hiçbir şey bozulmaz —
+sınıf yerinde, kod tanıyor — ama en gizli dosyalar indekslenmeye açılır.
+Birinci kontrol bu durumda susar. `sinif_alanlari` ise üçüncü bir iş
+yapar: tehlikeyi değil **yeri** söyler.
+
+Bu üçü, gerçek bir olaydan doğdu. `INTERNAL` adlı bir sınıf eklenmek
+istendi; YAML bloğu bir seviye içeri kaydı. Sonuç: aynı sözlükte tekrar
+eden anahtar üstündekini sessizce ezdi (PyYAML uyarmaz), `SECRET`'ın
+`rag_allowed` değeri `true` oldu ve `SECRET`'ın içinde boş bir
+`INTERNAL` anahtarı kaldı. Dokuz güvenlik testi kırıldı — ama
+`/denetle` **temiz** dedi. Denetçinin o an yalnızca yapısal kontrolü
+vardı.
+
+> Bir kontrolün "bir şey yanlış" diyebilmesi ile "şu satır yanlış"
+> diyebilmesi aynı cümle değildir. Nereye bakacağını söylemeyen bir
+> kontrol, ilk fırsatta kapatılır.
+
+### Yetenek kapatma — tek sapma, tek yetenek
+
+Tek bir sapma yüzünden bütün sistemi durdurmak güvenlik önlemi değil,
+hizmet kesintisidir — ve operasyon ekibi ilk fırsatta o önlemi kaldırır.
+Sapma hangi yeteneği etkiliyorsa yalnızca o kapanır:
+
+| Yetenek | Kapanınca ne olur | Kapı nerede |
+|---|---|---|
+| `rag` | `/indeksle`, `/bul`, `/sor` reddeder | Üç komutun başında |
+| `hafiza_prompt` | Hatıralar sistem promptuna girmez | `_aktif_hatiralar()` — tek darboğaz |
+| `araclar` | Model **araçsız yola düşer**, reddedilmez | `run_model_with_tools` sarmalayıcısı |
+
+**Tasarım notu — kapı ithal sınırında:** `run_model_with_tools`'un yedi
+çağrı yeri var. Her birine tek tek kapı koymak, sekizincisini unutmak
+demekti. Bunun yerine `execution.run_model_with_tools` takma adla ithal
+ediliyor ve `vasi.py` aynı adla kapılı bir sarmalayıcı tanımlıyor.
+Mevcut yedi çağrı da, ileride eklenecek olan da kendiliğinden kapsanıyor.
+Bir test, ham fonksiyonun kaynakta tam **bir** yerde geçtiğini doğruluyor.
+
+**Tasarım notu — araçlar kapanınca reddetmek yerine düşmek:** Düştüğü
+yol zaten sertleştirilmiş olan: `/sor`'un kullandığı, içinde araç
+yürütme **kodu bulunmayan** fonksiyon (bkz. Kontrol 12). Kapatma yeni
+bir güvenli yol icat etmiyor, kanıtlanmış olanı kullanıyor.
+
+**Tasarım notu — temiz denetim geri açar:** Sapma düzeltilip `/denetle`
+temiz çıkınca yetenek kendiliğinden açılır. Eski bir bulgu,
+düzeltildikten sonra yeteneği kapalı tutmaya devam edemez; denetim tek
+yetkilidir.
+
+### Geçersiz kılma — dört şart
+
+Bir güvenlik kontrolüne neden "kapat" düğmesi konur? Çünkü düğme olmazsa
+operatör kontrolü tamamen söker. Geçersiz kılma yolu **olmayan** bir
+kapatma, ilk acil durumda kodu değiştirerek aşılır — ve bir daha geri
+konmaz.
+
+Ama düğmenin bedeli var, o yüzden dört şartı birden taşır:
+
+1. **Açık** — kod değiştirerek değil, `/gecersiz_kil <yetenek>` ile
+2. **Onaylı** — Telegram onay butonu; tek tuşla kazayla açılmaz
+3. **İzli** — denetim günlüğüne yazılır
+4. **Süreli** — `SOVEREIGN_OVERRIDE_TTL_SECONDS` (varsayılan 1800 sn)
+
+Dördüncüsü en önemlisi. **Süresiz geçersiz kılma, kontrolü silmektir** —
+adı kalır, kendisi kalmaz. Bu sistem bu ilkeye zaten inanıyor:
+`PENDING_ACTION_TTL_SECONDS`, bekleyen bir onayın süresiz açık
+kalmaması için var (Kontrol 1). Aynı ilke, kontrolün kapatma düğmesine
+de uygulanıyor: süre dolunca yetenek kendiliğinden yeniden kapanır ve
+operatör asıl sorunu çözmek zorunda kalır.
+
+`/gecersiz_kil` komutu `ONAY_GEREKEN_KOMUTLAR` listesinde — yani
+denetçi kendi kapatma düğmesini de denetliyor.
+
+### Zaman içinde sapma — değişiklik, sapma değildir
+
+Yukarıdaki kontroller **kuralları** doğrular: "şu böyle olmalı." Ama her
+şey için kural yazılamaz. Geriye kalan soru şu: bir alan dün neyse bugün
+de o mu?
+
+Her denetimde izlenen alanların bir parmak izi alınır ve bir sonraki
+denetimde karşılaştırılır. İzlenen alanlar **açık bir listedir** —
+"şunlar hariç hepsi" değil (Kontrol 3'ün aynı gerekçesi). Sayaçlar
+(`komut_sayisi`, `hata_sayisi`) kapsam dışıdır; kapsama girselerdi her
+denetim "sapma var" derdi ve kontrol bir haftada kapatılırdı.
+
+Bir aracı bilerek eklerseniz parmak izi değişir ve bu doğrudur. Bu
+yüzden bu bulgunun önemi her zaman `BİLGİ`'dir ve hiçbir yeteneği
+kapatmaz. Türü yine de **deterministiktir**: "şu alan değişti" bir
+olgudur, tahmin değil. Tür ile önem ayrı eksenler olduğu için bu ikisi
+aynı anda söylenebiliyor.
+
+**Tasarım notu — taban çizgisi ne zaman ilerler:** Başlangıç denetimi
+raporlar ama **kaydetmez.** Taban çizgisi yalnızca `/denetle` ile
+ilerler — yani bir insan raporu gördüğünde. Başlangıç kaydetseydi şu
+olurdu: politika değiştirilir, yeniden başlatılır, başlangıç denetimi
+farkı bulur ve **konteyner günlüğüne** yazar, sonra yeni hâli taban
+çizgisi yapar. Bir sonraki `/denetle` fark göremez; sapma tespit edilmiş
+ama kimseye ulaşmamış olur.
+
+### Katman notu — denetçi neyi bilmez
+
+`sovereign.py` **hiçbir yerel modülü import etmez.** Denetlediği her
+sabit ona anlık görüntü sözlüğü olarak parametreyle gider. Üç sonucu
+var:
+
+- Bozulan bir modül denetçiyi de susturamaz
+- Denetim mantığı PostgreSQL olmadan test edilebilir
+- Bir kontrol hata verirse **diğerleri çalışmaya devam eder** — ama
+  sessizce geçmez, hatalı kontrol sonuca yazılır
+
+Başlangıç denetimi de aynı mantıkla kuşatılmıştır: denetim hata verirse
+sistem yine de açılır. **Denetçiyi başlangıç şartı yapmak, koruduğu
+şeyden daha büyük bir risk yaratır** — bozuk bir kontrol bütün botu yere
+indirir.
+
+**Uygulama**
+- `sovereign.py` → `Bulgu.durdurabilir` — üç koşullu durdurma kuralı
+- `sovereign.py` → `KONTROLLER` — on kontrolün kaydı
+- `sovereign.py` → `audit()` — bir kontrol patlarsa diğerleri devam eder
+- `sovereign.py` → `YetenekKapisi` — kapatma, geçersiz kılma, süre
+- `sovereign.py` → `parmak_izi()`, `IZLENEN_ALANLAR` — saf fonksiyon
+- `sovereign_store.py` → `son_iz()`, `kaydet()` — denetim izi (PostgreSQL)
+- `vasi.py` → `guvenlik_anlik_goruntusu()` — denetlenen sabitlerin toplandığı yer
+- `vasi.py` → `yetenek_engeli()` — reddin gerekçesini taşıyan mesaj
+- `vasi.py` → `run_model_with_tools()` — ithal sınırındaki kapı
+- `vasi.py` → `cmd_denetle()`, `cmd_gecersiz_kil()`
+- `vasi.py` → `build_sovereign_health()` — `/saglik` satırı
+
+**Tasarım notu — reddin kendisi ulaşabilmeli:** Yetenek engeli mesajı
+**düz metin** gönderilir, bilerek. Bu mesaj değişken içerik taşır:
+kontrol adları (`politika_kod_uyumu`) ve bulgu metinleri (`/kod_patch`,
+`rag_allowed`) alt çizgi doludur. Markdown ayrıştırıcısı alt çizgiyi
+italik işareti sayar; tek sayıda alt çizgi kalırsa Telegram mesajı **hiç
+göndermez** ve istisna fırlar.
+
+Sonuç bir görüntü bozukluğu değil: güvenlik reddi sessizce kaybolur.
+Komut çalışmaz, kullanıcı nedenini öğrenemez — yani kontrol, kendisini
+anlatamaz hâle gelir. Bir güvenlik kontrolü seni durdurup nereye
+bakacağını söylemiyorsa, ilk işin onu kapatmak olur.
+
+Bir test `vasi.py` içinde `parse_mode` geçmediğini doğruluyor; bir
+diğeri gerçek bir bulgu metninin tek sayıda alt çizgi ürettiğini
+gösterip birincinin neden var olduğunu belgeliyor.
+
+**Test:** `tests/test_sovereign.py` — 87 test
+
+Öne çıkanlar:
+- `test_sezgisel_bulgu_durduramaz` — bir tahmin yetenek kapatamaz
+- `test_sovereign_hicbir_yerel_modulu_import_etmiyor` — katman kuralı
+- `test_sovereign_hala_veritabani_bilmiyor` — kalıcılık ayrı dosyada
+- `test_bir_kontrol_patlarsa_digerleri_devam_eder`
+- `test_anlik_goruntu_tum_alanlari_iceriyor` — eksik alan kontrolü sessizce kapatır
+- `test_gecersiz_kilma_suresi_dolunca_yetenek_yeniden_kapaniyor`
+- `test_hicbir_yerde_ham_arac_fonksiyonu_dogrudan_cagrilmiyor`
+- `test_parmak_izi_sayaclari_kapsamiyor`
+- `test_baslangic_denetimi_iz_kaydetmiyor`
+- `test_hicbir_mesaj_bicimlendirme_ayristiricisindan_gecmiyor`
+- `test_canli_sistem_denetimden_temiz_geciyor` — çalışan sistemi denetler
+
+> **Bir test, hiçbir şey korumuyordu.** Küme sıralamasını doğrulayan ilk
+> test iki özdeş kümeyi karşılaştırıyordu. Korunan satır kırıldığında
+> test yine geçti: aynı süreçte küçük bir küme hep aynı sırayla
+> dolaşılır. Üç elemanla yeniden yazıldı, yine geçti. On iki elemanlı
+> bir kümeyle kesin eşitlik sınandığında üç denemede de kırıldı.
+>
+> Kırıp bakılmasaydı elde çalışır görünen, hiçbir şey korumayan bir test
+> kalacaktı. Bu depodaki her güvenlik testi, yazıldıktan sonra
+> **korduğu kod kırılarak** doğrulanmıştır.
+
+### Bilinen sınırlar
+
+1. **Denetçi çalışan sistemi denetler, diskteki dosyayı değil.**
+   Politika konteyner imajına gömülü olduğu için normalde ikisi aynıdır.
+   `policies/` dışarıdan bağlanırsa ayrışabilirler ve denetçi bunu
+   içeriden göremez — karşılaştıracağı ikinci bir kopya yoktur.
+2. **Sezgisel kontrol asla durdurmaz.** Bu bilinçli; bedeli, gerçek bir
+   saldırı örüntüsünün yalnızca raporlanmasıdır.
+3. **Zaman sapması `BİLGİ` seviyesindedir.** Kötü niyetli bir değişiklik
+   ile kasıtlı bir değişiklik bu kontrol tarafından ayırt edilemez;
+   ayırt edebilenler yukarıdaki kural tabanlı kontrollerdir.
+4. **Geçersiz kılma süresi uzatılabilir.** Süre dolunca yetenek yeniden
+   kapanır, ama operatör komutu tekrar çalıştırabilir. Kasıtlı olarak
+   engellenmedi: engellenseydi kodu değiştirmek tek yol kalırdı.
+
+---
+
 ## Testleri Çalıştırma
 
 ```bash
 docker compose run --rm vasi-core python -m pytest
 ```
 
-Beklenen: 367 test geçer.
+Beklenen: 454 test geçer.
 
 ---
 
@@ -613,10 +869,14 @@ amaçlar. Aşağıdakiler bilinen boşluklardır:
    asıl koruma araç yokluğudur
 3. Hafıza türleri ayrıştırılmıyor; tüm kayıtlar `preference` olarak
    saklanıyor (şema `fact` ve `context` türlerini de tanımlıyor)
-3. Kırmızı takım değerlendirmesi yapılmadı — testler kontrollerin
+4. Sapma denetçisi **çalışan sistemi** denetler, diskteki dosyayı
+   değil. Politika konteyner imajına gömülü olduğu için bu ayrım
+   normalde görünmez; `policies/` dışarıdan bağlanırsa ikisi
+   ayrışabilir ve denetçi bunu içeriden göremez (Kontrol 13)
+5. Kırmızı takım değerlendirmesi yapılmadı — testler kontrollerin
    yazıldığı gibi çalıştığını doğrular, kararlı bir saldırgana karşı
    yeterli olduğunu değil
-4. Tehdit modeli tek operatörlü kişisel sistemdir; çok kullanıcılı
+6. Tehdit modeli tek operatörlü kişisel sistemdir; çok kullanıcılı
    senaryolar kapsam dışıdır
 
 ---

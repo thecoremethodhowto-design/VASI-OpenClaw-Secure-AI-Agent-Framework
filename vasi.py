@@ -2,6 +2,8 @@ import asyncio
 import os
 import json
 import difflib
+import inspect
+import re
 import glob
 import ipaddress
 import socket
@@ -107,7 +109,10 @@ from execution import (
     list_workspace_files,
     ollama_client,
     read_file,
-    run_model_with_tools,
+    # Dogrudan kullanilmaz: asagida ayni adla KAPILI bir sarmalayici
+    # tanimlaniyor. Kapiyi ithal sinirina koymak, her cagri yerine tek
+    # tek koymaktan guvenli -- unutulacak bir cagri yeri kalmiyor.
+    run_model_with_tools as _araclarla_calistir,
     save_file,
     skill_get_time,
     skill_web_radar,
@@ -119,6 +124,10 @@ import memory
 
 # ── RAG KATMANI ───────────────────────────────────────────────────────────────
 import rag
+
+# ── SOVEREIGN KATMANI ─────────────────────────────────────────────────────────
+import sovereign
+import sovereign_store
 
 # ── DECISION KATMANI (DACE) ───────────────────────────────────────────────────
 import decision
@@ -137,6 +146,9 @@ OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")  # Optional güvenlik
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 PENDING_ACTION_TTL_SECONDS = int(os.getenv("PENDING_ACTION_TTL_SECONDS", "600"))
+# Bir yetenegin gecersiz kilinmasi ne kadar surer?
+# Suresiz gecersiz kilma, kontrolu silmektir -- adi kalir, kendisi kalmaz.
+SOVEREIGN_OVERRIDE_TTL_SECONDS = int(os.getenv("SOVEREIGN_OVERRIDE_TTL_SECONDS", "1800"))
 LOG_FILE = Path(os.getenv("VASI_LOG_FILE", "/tmp/vasi_audit.log"))
 NOTES_FILE = os.getenv("VASI_NOTES_FILE", "notlar/NOTES.md")
 CHANNEL_STYLE_FILE = os.getenv("VASI_CHANNEL_STYLE_FILE", "skills/youtube_icerik.md")
@@ -226,7 +238,7 @@ Komutlar:
 /kod_patch <istek> - Uygulanabilir patch taslağı üretir (dosya yazmaz)
 /guvenlik - Mevcut güvenlik kontrollerini deterministik raporlar
 /siniflandir <dosya> - Dosyanın veri sınıfını ve Gemini aktarım iznini gösterir
-/temizle - Konuşma geçmişini sıfırlar\n/hatirla <bilgi> - Kalıcı bir hatıra kaydeder (onay ister)\n/hatirlananlar - Kayıtlı hatıraları listeler\n/unut <numara> - Bir hatırayı pasifleştirir (onay ister)\n/indeksle - Belgeleri RAG indeksine ekler (politikanın izin verdikleri)\n/bul <sorgu> - İndekste anlamsal arama (model kullanmaz)\n/sor <soru> - Belgelerine dayalı cevap (yerel model, araçsız)
+/temizle - Konuşma geçmişini sıfırlar\n/hatirla <bilgi> - Kalıcı bir hatıra kaydeder (onay ister)\n/hatirlananlar - Kayıtlı hatıraları listeler\n/unut <numara> - Bir hatırayı pasifleştirir (onay ister)\n/indeksle - Belgeleri RAG indeksine ekler (politikanın izin verdikleri)\n/bul <sorgu> - İndekste anlamsal arama (model kullanmaz)\n/sor <soru> - Belgelerine dayalı cevap (yerel model, araçsız)\n/denetle - Kod, politika ve yapılandırma uyumunu denetler\n/gecersiz_kil <yetenek> - Kapatılmış bir yeteneği geçici açar (onay ister)
 /saglik - Bileşen sağlık durumunu gösterir
 /istatistik - Komut, hata ve model kullanım özetini gösterir
 /audit_ozet - Son olay ve audit özetini gösterir
@@ -395,6 +407,9 @@ def build_security_report() -> str:
         if USE_LITELLM
         else "Kapalı; model çağrıları doğrudan Ollama'ya gider."
     )
+    sovereign_state = YETENEK_KAPISI.durum_satiri()
+    _iz_durum, _iz_detay = sovereign_store.health()
+    iz_state = _iz_detay
 
     return f"""# Vasi Güvenlik Durumu
 
@@ -434,6 +449,9 @@ def build_security_report() -> str:
 - RAG politika filtresi: İndeksleme ve arama, her ikisinde de `rag_allowed` kontrol edilir; politika değişirse eski parçalar aramada çıkmaz.
 - RAG köken etiketi: Web aramasından üretilen dosyalar `web_kaynakli` işaretlenir ve sonuçlarda görünür.
 - Sınıflandırma önceliği: Birden fazla desene uyan dosyada en kısıtlayıcı sınıf kazanır (`SINIF_ONCELIGI`).
+- Sapma denetçisi: `/denetle` kod, politika ve yapılandırma uyumunu sınar; başlangıçta da çalışır. Deterministik + kritik bir bulgu ilgili yeteneği kapatır. {sovereign_state}
+- Denetim izi: {iz_state}. Her denetimde parmak izi yazılır; bir sonraki denetim farkı bildirir. Değişiklik kendiliğinden sapma sayılmaz (BİLGİ seviyesi, hiçbir yeteneği kapatmaz).
+- Geçersiz kılma sınırı: `/gecersiz_kil` onay ister, denetim günlüğüne yazılır ve {SOVEREIGN_OVERRIDE_TTL_SECONDS // 60} dakika sonra kendiliğinden kalkar; süresiz kapatma yoktur.
 - Docker hardening: `read_only`, `tmpfs /tmp`, `no-new-privileges`, `cap_drop: ALL` compose dosyasında tanımlı.
 - Sır koruması: `.env` git/docker ignore içinde; loglarda `httpx` Telegram URL logları susturuldu.
 - Audit izi: Hassas içerik maskeleyen `AUDIT` satırları tutulur.
@@ -489,7 +507,14 @@ def _aktif_hatiralar() -> list[str]:
 
     GUVENLIK: prompt_memories() yalnizca PROMPTA_GIREBILEN kaynakli
     kayitlari dondurur. Bugun bu kume tek elemanli: ("user",).
+
+    YETENEK KAPISI: Kaynak filtresinde sapma varsa hic hatira
+    dondurulmez. Tek darbogaz olmasi burada ise yariyor -- butun
+    cagri yerleri tek kontrolle kapsaniyor.
     """
+    if not YETENEK_KAPISI.acik(sovereign.YETENEK_HAFIZA):
+        logger.warning("🔒 Hafiza prompt yetenegi kapali; hatiralar gonderilmiyor.")
+        return []
     try:
         return memory.prompt_memories()
     except Exception as e:
@@ -506,6 +531,35 @@ def build_memory_health() -> HealthCheck:
     durum, detay = memory.health()
     return HealthCheck("PostgreSQL", durum, details=detay)
 
+def build_sovereign_health() -> HealthCheck:
+    """Denetcinin durumu tek satirda.
+
+    Asil soru operasyonel: "neden /bul calismiyor?" Cevabi burada
+    gorunmeli. Kapali bir yetenek HATA sayilir -- sistem calisiyor ama
+    eksik calisiyor, ve bunu saglik raporunda gizlemek, operatorun
+    sebebi kodda aramasina yol acar.
+    """
+    kontrol_sayisi = len(sovereign.KONTROLLER)
+    iz_durum, iz_detay = sovereign_store.health()
+
+    kapali = sorted(YETENEK_KAPISI.kapali)
+    if kapali:
+        gecersiz = [y for y in kapali if YETENEK_KAPISI.acik(y)]
+        if gecersiz:
+            return HealthCheck(
+                "Sovereign", "warn",
+                details=f"{', '.join(gecersiz)} geçersiz kılındı; /denetle ile bakın",
+            )
+        return HealthCheck(
+            "Sovereign", "error",
+            details=f"{', '.join(kapali)} kapalı; sebep için /denetle",
+        )
+
+    if iz_durum == "error":
+        return HealthCheck("Sovereign", "warn", details=f"{kontrol_sayisi} kontrol; iz yok ({iz_detay})")
+    return HealthCheck("Sovereign", "ok", details=f"{kontrol_sayisi} kontrol, {iz_detay}")
+
+
 def build_health_report() -> str:
     checks = [
         timed_check("Ollama", lambda: f"{len(get_ollama_model_names())} model hazır"),
@@ -514,6 +568,7 @@ def build_health_report() -> str:
         skills_health(WORKSPACE),
         build_memory_health(),
         build_rag_health(),
+        build_sovereign_health(),
     ]
     return format_health_report(checks, OBSERVABILITY.last_command_summary())
 
@@ -1088,6 +1143,11 @@ async def cmd_bul(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
         return
 
+    engel = yetenek_engeli(sovereign.YETENEK_RAG)
+    if engel:
+        await update.message.reply_text(engel)
+        return
+
     if not memory.is_configured():
         await update.message.reply_text(_hafiza_kapali_mesaji())
         return
@@ -1141,6 +1201,11 @@ async def cmd_sor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update): return
     if not check_rate_limit(str(update.effective_user.id)):
         await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
+        return
+
+    engel = yetenek_engeli(sovereign.YETENEK_RAG)
+    if engel:
+        await update.message.reply_text(engel)
         return
 
     if not memory.is_configured():
@@ -1225,6 +1290,11 @@ async def cmd_indeksle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
         return
 
+    engel = yetenek_engeli(sovereign.YETENEK_RAG)
+    if engel:
+        await update.message.reply_text(engel)
+        return
+
     if not memory.is_configured():
         await update.message.reply_text(_hafiza_kapali_mesaji())
         return
@@ -1249,6 +1319,262 @@ async def cmd_indeksle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"yeni={rapor['yeni']} parca={rapor['parca']} silinen={rapor['silinen']}",
     )
     await update.message.reply_text(_indeks_raporu(rapor))
+
+# ── GUVENLIK ANLIK GORUNTUSU ──────────────────────────────────────────────────
+
+# Kalici etkisi olan komutlar: her biri onay istemeli. Yeni bir komut
+# eklenip onay kapisi unutulursa denetci yakalar.
+ONAY_GEREKEN_KOMUTLAR = frozenset({
+    "yaz", "ekle", "sil", "fikir", "senaryo", "ara_senaryo",
+    "ara_not", "tarzim", "rapor", "hatirla", "unut",
+    # Bir guvenlik kontrolunu gecersiz kilmak, kalici etkisi olan her
+    # islemden daha fazla onay hak eder. Denetci bu komutu da denetler.
+    "gecersiz_kil",
+})
+
+# NOT: /kod_patch bilerek disarida. Dosyaya YAZMAZ; yalnizca bir yama
+# onerisi gosterir. Ilk denetimde bu listede vardi ve denetci "onay
+# istemiyor" diye bayrak kaldirdi -- ama sapma kodda degil, listenin
+# kendisindeydi. Denetcinin ilk bulgulari cogu zaman boyledir.
+
+
+# Denetim sonucunu tasiyan kapi. Denetim UYGULAR, komutlar SORAR.
+YETENEK_KAPISI = sovereign.YetenekKapisi()
+
+
+def yetenek_engeli(yetenek: str) -> str | None:
+    """Yetenek kapaliysa kullaniciya gosterilecek mesaj, acikssa None.
+
+    Mesaj UC seyi soylemeli: ne kapandi, NEDEN kapandi, nasil acilir.
+    "Kullanilamiyor" diyen bir hata mesaji, operatoru kodu degistirmeye
+    iter -- ve kod degistirerek asilan bir kontrol geri konmaz.
+
+    DUZ METIN, bilerek. Bu mesaj degisken icerik tasiyor: kontrol
+    adlari (politika_kod_uyumu) ve bulgu metinleri (/kod_patch,
+    rag_allowed) alt cizgi doludur. Markdown ayristiricisi alt cizgiyi
+    italik isareti sayar; tek sayida alt cizgi kalirsa Telegram mesaji
+    HIC GONDERMEZ ve istisna firlar.
+
+    Sonuc: guvenlik reddi sessizce kaybolur. Komut calismaz, kullanici
+    nedenini ogrenemez -- yani kontrol, kendisini anlatamaz hale gelir.
+    Uretilen degisken metin bicimlendirme ayristiricisindan gecirilmez.
+    """
+    if YETENEK_KAPISI.acik(yetenek):
+        return None
+    return (
+        f"🔒 Bu işlem şu an kapalı: {yetenek}\n\n"
+        f"Sebep — {YETENEK_KAPISI.neden_kapali(yetenek)}\n\n"
+        f"Sapmayı düzeltip /denetle çalıştırın; temiz çıkarsa kendiliğinden "
+        f"açılır. Düzeltmeden devam etmeniz gerekiyorsa: "
+        f"/gecersiz_kil {yetenek} "
+        f"({SOVEREIGN_OVERRIDE_TTL_SECONDS // 60} dakika geçerli)."
+    )
+
+
+async def run_model_with_tools(
+    model: str,
+    user_prompt: str,
+    system_prompt: str | None = None,
+    options: dict | None = None,
+    on_tool_use=None,
+    history: list | None = None,
+) -> str:
+    """Arac yetenegi kapaliysa ARACSIZ yola duser.
+
+    Reddetmek yerine dusurmek bilincli bir tercih: model yine cevap
+    verir, yalnizca elinde arac olmaz. Sistemi tumden durdurmak, ilk
+    firsatta kontrolun sokulmesiyle sonuclanir.
+
+    Dustugumuz yol zaten sertlestirilmis olan: /sor'un kullandigi,
+    icinde arac yurutme KODU BULUNMAYAN fonksiyon. Kapatma, yeni bir
+    guvenli yol icat etmiyor -- kanitlanmis olani kullaniyor.
+
+    NOT: aracsiz yolda konusma gecmisi tasinmaz; run_model_without_tools
+    history almaz. Kapali moddaki cevaplar baglamsizdir.
+    """
+    if YETENEK_KAPISI.acik(sovereign.YETENEK_ARACLAR):
+        return await _araclarla_calistir(
+            model, user_prompt, system_prompt, options, on_tool_use, history
+        )
+
+    cevap, denenen = await asyncio.to_thread(
+        run_model_without_tools, model, user_prompt, system_prompt, options
+    )
+    if denenen:
+        logger.warning(
+            f"🔒 Araclar kapali; model yine de cagirmayi denedi: {', '.join(denenen)}"
+        )
+    return cevap
+
+
+def _onay_isteyen_komutlar() -> set[str]:
+    """Kaynak kodu okuyarak hangi komutlarin onay istedigini bulur.
+
+    Elle liste tutulmuyor: yeni bir komut set_pending kullanirsa
+    kendiliginden kapsanir. Bu projede elle tutulan bir liste bir kez
+    geride kaldi (conftest modul temizligi).
+    """
+    kaynak = Path(__file__).read_text(encoding="utf-8")
+    bulunan = set()
+    for ad in re.findall(r"async def cmd_(\w+)\(", kaynak):
+        govde = inspect.getsource(globals()[f"cmd_{ad}"])
+        if "set_pending(" in govde:
+            bulunan.add(ad)
+    return bulunan
+
+
+def guvenlik_anlik_goruntusu() -> dict:
+    """Denetcinin inceleyecegi sabitleri tek bir sozlukte toplar.
+
+    KATMAN NOTU: sovereign.py hicbir yerel modulu import etmez.
+    Denetledigi her sey buradan parametre olarak gider. Boylece
+    denetledigi bir moduldeki sorun denetciyi de bozamaz.
+    """
+    politika = access._load_classification_policy()
+    return {
+        "izinli_araclar": set(ALLOWED_TOOL_NAMES),
+        "sunulan_araclar": {
+            t["function"]["name"] for t in OPENCLAW_TOOLS if "function" in t
+        },
+        "sinif_onceligi": access.SINIF_ONCELIGI,
+        "politika_siniflari": politika.get("classifications", {}),
+        "prompta_girebilen": memory.PROMPTA_GIREBILEN,
+        "gecerli_kaynaklar": memory.GECERLI_KAYNAKLAR,
+        "onay_gereken_komutlar": ONAY_GEREKEN_KOMUTLAR,
+        "onay_isteyen_komutlar": _onay_isteyen_komutlar(),
+        "aracsiz_fonksiyon_kaynagi": inspect.getsource(run_model_without_tools),
+        "komut_sayisi": sum(OBSERVABILITY.command_counts.values()),
+        "hata_sayisi": sum(OBSERVABILITY.error_counts.values()),
+        **_onceki_iz_alanlari(),
+    }
+
+
+def _onceki_iz_alanlari() -> dict:
+    """Bir onceki denetimin parmak izini anlik goruntuye ekler.
+
+    KATMAN NOTU: sovereign.py veritabanini bilmez. Gecmis de ona
+    parametre olarak gidiyor -- tipki sabitler gibi.
+
+    Veritabani yoksa ya da okunamazsa BOS doner: zaman icinde sapma
+    izlenmez, ama denetimin geri kalani calismaya devam eder. Bir
+    kontrolun eksigi, butun denetimi durdurmamali.
+    """
+    if not memory.is_configured():
+        return {}
+    try:
+        kayit = sovereign_store.son_iz()
+    except Exception as e:
+        logger.warning(f"⚠️ Onceki denetim izi okunamadi: {e}")
+        return {}
+    if not kayit:
+        return {}
+    izi, zaman = kayit
+    return {
+        "onceki_parmak_izi": izi,
+        "onceki_parmak_izi_zamani": zaman.astimezone().strftime("%d.%m %H:%M"),
+    }
+
+
+def _izi_kaydet(goruntu: dict) -> None:
+    """Denetim sonrasi yeni parmak izini yazar. Hata yutulur."""
+    if not memory.is_configured():
+        return
+    try:
+        sovereign_store.kaydet(sovereign.parmak_izi(goruntu))
+    except Exception as e:
+        logger.warning(f"⚠️ Denetim izi kaydedilemedi: {e}")
+
+
+async def cmd_denetle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Sapma denetimi calistirir.
+
+    Testler kodu dogrular -- siz calistirdiginizda. Bu komut calisan
+    sistemi dogrular, ayaktayken.
+    """
+    if not is_authorized(update): return
+    if not check_rate_limit(str(update.effective_user.id)):
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
+        return
+
+    user_id = str(update.effective_user.id)
+    try:
+        goruntu = guvenlik_anlik_goruntusu()
+    except Exception as e:
+        logger.error(f"❌ Anlik goruntu alinamadi: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Denetim yapılamadı: {e}")
+        return
+
+    sonuc = sovereign.audit(goruntu)
+
+    # Faz 2: rapor artik EYLEME donusuyor.
+    yeni_kapanan = YETENEK_KAPISI.uygula(sonuc)
+    for yetenek in sorted(yeni_kapanan):
+        audit_event("sovereign_yetenek_kapandi", user_id, yetenek)
+        logger.warning(f"🔒 Yetenek kapatildi: {yetenek}")
+
+    audit_event(
+        "sovereign_audit", user_id,
+        f"bulgu={len(sonuc.bulgular)} kontrol={sonuc.calisan_kontrol} "
+        f"kapali={','.join(sorted(YETENEK_KAPISI.kapali)) or 'yok'}",
+    )
+
+    _izi_kaydet(goruntu)
+
+    rapor = sovereign.format_report(sonuc)
+    if YETENEK_KAPISI.kapali:
+        rapor += (
+            f"\n\n🔒 {YETENEK_KAPISI.durum_satiri()}\n"
+            f"Düzeltmeden devam etmeniz gerekiyorsa: "
+            f"/gecersiz_kil <yetenek>"
+        )
+    for i in range(0, len(rapor), 3900):
+        await update.message.reply_text(rapor[i:i + 3900])
+
+async def cmd_gecersiz_kil(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Kapatilmis bir yetenegi GECICI olarak yeniden acar.
+
+    Dort sart: acik (komutla), onayli (tek tusla degil), izli
+    (denetim gunlugune), sureli (kendiliginden kapanir).
+    """
+    if not is_authorized(update): return
+    if not check_rate_limit(str(update.effective_user.id)):
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
+        return
+
+    yetenek = (context.args[0].strip().lower() if context.args else "")
+    if not yetenek:
+        kapali = sorted(YETENEK_KAPISI.kapali) or ["—"]
+        await update.message.reply_text(
+            "Kullanım: /gecersiz_kil <yetenek>\n\n"
+            f"Şu an kapalı: {', '.join(kapali)}"
+        )
+        return
+
+    if yetenek not in sovereign.GECERLI_YETENEKLER:
+        await update.message.reply_text(
+            f"❌ Bilinmeyen yetenek: {yetenek}\n"
+            f"Geçerli olanlar: {', '.join(sovereign.GECERLI_YETENEKLER)}"
+        )
+        return
+
+    if YETENEK_KAPISI.acik(yetenek):
+        await update.message.reply_text(
+            f"ℹ️ {yetenek} zaten açık. Geçersiz kılmaya gerek yok."
+        )
+        return
+
+    onizleme = (
+        f"⚠️ GÜVENLİK KONTROLÜNÜ GEÇERSİZ KILMA\n\n"
+        f"Yetenek: {yetenek}\n"
+        f"Kapatan bulgu: {YETENEK_KAPISI.neden_kapali(yetenek)}\n\n"
+        f"Onaylarsanız bu yetenek {SOVEREIGN_OVERRIDE_TTL_SECONDS // 60} dakika "
+        f"açık kalır, sonra kendiliğinden yeniden kapanır.\n"
+        f"Sapma DÜZELMİŞ OLMAZ — yalnızca görmezden gelinir.\n\n"
+        f"Bu işlem denetim günlüğüne yazılır."
+    )
+    metin, klavye = set_pending(context, "gecersiz_kil", onizleme, yetenek=yetenek)
+    await update.message.reply_text(metin, reply_markup=klavye)
+
 
 async def cmd_temizle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Konusma gecmisini sifirlar. Konu degistirirken kullanilir."""
@@ -1401,6 +1727,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     result = f"❌ #{pending['memory_id']} bulunamadı veya zaten pasif."
             except memory.MemoryError_ as e:
                 result = f"❌ İşlem başarısız: {e}"
+        elif action == "gecersiz_kil":
+            yetenek = pending["yetenek"]
+            bitis = YETENEK_KAPISI.gecersiz_kil(yetenek, SOVEREIGN_OVERRIDE_TTL_SECONDS)
+            audit_event(
+                "sovereign_gecersiz_kilindi", user_id,
+                f"{yetenek} bitis={bitis.isoformat()}",
+            )
+            result = (
+                f"🔓 {yetenek} geçici olarak açıldı.\n\n"
+                f"Bitiş: {bitis.astimezone().strftime('%H:%M')} "
+                f"({SOVEREIGN_OVERRIDE_TTL_SECONDS // 60} dakika)\n\n"
+                f"Süre dolunca kendiliğinden yeniden kapanır. Asıl sapma "
+                f"duruyor — /denetle ile görebilirsiniz."
+            )
         else:
             result = "Hata: Bilinmeyen işlem."
 
@@ -1570,8 +1910,52 @@ if __name__ == "__main__":
                 rag.init_schema()
             except memory.MemoryError_ as e:
                 logger.warning(f"⚠️ RAG semasi kurulamadi: {e}")
+            try:
+                sovereign_store.init_schema()
+            except memory.MemoryError_ as e:
+                logger.warning(f"⚠️ Sovereign iz semasi kurulamadi: {e}")
         else:
             logger.info("💤 Hafiza kapali (POSTGRES_PASSWORD yok)")
+
+        # BASLANGIC DENETIMI. Yapilandirma sapmasi en cok burada onemli:
+        # sistem ayaga kalkarken neyi yuklediyse, onunla calisacak.
+        #
+        # Denetim kendisi HATA VERIRSE sistem yine de acilir. Denetciyi
+        # baslangic sarti yapmak, korudugu seyden daha buyuk bir risk
+        # yaratir -- bozuk bir kontrol butun botu yere indirir.
+        # BASLANGIC IZ KAYDETMEZ. Taban cizgisi yalnizca /denetle ile
+        # ilerler -- yani bir INSAN raporu gordugunde.
+        #
+        # Kaydetseydi su olurdu: politika degistirilir, yeniden
+        # baslatilir, baslangic denetimi farki bulur ve KONTEYNER
+        # GUNLUGUNE yazar, sonra yeni hali taban cizgisi yapar. Bir
+        # sonraki /denetle fark goremez. Sapma tespit edilmis ama
+        # kimseye ulasmamis olur.
+        #
+        # Bu dagitimda politika imaja gomulu; her politika degisikligi
+        # zaten bir yeniden baslatma demek. Yani baslangic kaydetseydi
+        # zaman sapmasi Telegram'da HIC gorunmezdi.
+        try:
+            _goruntu = guvenlik_anlik_goruntusu()
+            _baslangic_sonucu = sovereign.audit(_goruntu)
+            _kapanan = YETENEK_KAPISI.uygula(_baslangic_sonucu)
+            for _y in sorted(_kapanan):
+                logger.warning(f"🔒 Baslangicta yetenek kapatildi: {_y}")
+
+            # Rapor KAPANAN YETENEGE gore degil, BULGUYA gore verilir.
+            # Kapatmayan bir bulgu da bir bulgudur; "temiz" demek yalan
+            # olurdu.
+            if _baslangic_sonucu.temiz:
+                logger.info(
+                    f"🛡️ Denetim temiz ({_baslangic_sonucu.calisan_kontrol} kontrol)"
+                )
+            else:
+                for _b in _baslangic_sonucu.bulgular:
+                    logger.warning(f"🛡️ [{_b.onem}] {_b.kontrol}: {_b.mesaj}")
+                if _kapanan:
+                    logger.warning(f"🛡️ {YETENEK_KAPISI.durum_satiri()}")
+        except Exception as e:
+            logger.error(f"⚠️ Baslangic denetimi calismadi: {e}", exc_info=True)
 
         logger.info("="*60)
         
@@ -1601,6 +1985,8 @@ if __name__ == "__main__":
         app.add_handler(CommandHandler("indeksle", observed_command("indeksle", cmd_indeksle)))
         app.add_handler(CommandHandler("bul", observed_command("bul", cmd_bul)))
         app.add_handler(CommandHandler("sor", observed_command("sor", cmd_sor)))
+        app.add_handler(CommandHandler("denetle", observed_command("denetle", cmd_denetle)))
+        app.add_handler(CommandHandler("gecersiz_kil", observed_command("gecersiz_kil", cmd_gecersiz_kil)))
         app.add_handler(CommandHandler("saglik", observed_command("saglik", cmd_saglik)))
         app.add_handler(CommandHandler("istatistik", observed_command("istatistik", cmd_istatistik)))
         app.add_handler(CommandHandler("audit_ozet", observed_command("audit_ozet", cmd_audit_ozet)))

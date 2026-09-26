@@ -52,8 +52,9 @@ varsayıma göre tasarlanmıştır.
 VASİ'nin temel prensibi: **model önerir, kritik işlemler kullanıcı onayı
 olmadan yapılmaz.**
 
-Bu prensip, sekiz tehdit sınıfının analizinden çıkan sekiz somut ilkeye
-dayanır:
+Bu prensip, tehdit sınıflarının analizinden çıkan on iki somut ilkeye
+dayanır. İlk sekizi video serisindeki sekiz tehdit sınıfından gelir;
+kalanlar sistem büyüdükçe eklendi:
 
 1. **Onay kapısı** — Kalıcı etkisi olan hiçbir işlem, açık ve süreli bir
    insan onayı olmadan çalışmaz.
@@ -79,6 +80,12 @@ dayanır:
     modele ulaştığı yerlerde (RAG), araç çağrısı "yasak" değildir;
     çalıştıracak kod yolu yoktur. Bir kısıtlamayı unutmak mümkündür,
     var olmayan bir kod yolunu çağırmak değildir.
+12. **Sistem kendini denetler** — Kod, politika ve yapılandırmanın hâlâ
+    birbiriyle uyumlu olduğu çalışırken doğrulanır. Deterministik ve
+    kritik bir bulgu ilgili yeteneği kapatır; sezgisel bir bulgu
+    yalnızca raporlar. Kapatmanın geçersiz kılma yolu vardır, çünkü
+    geçersiz kılınamayan bir kontrol tamamen sökülür — ama o geçersiz
+    kılma onaylıdır, izlidir ve **sürelidir**.
 
 Her ilkenin koddaki tam karşılığı, ilgili testleri ve bilinen eksikleri
 için: **[THREAT-MAPPING.md](THREAT-MAPPING.md)**
@@ -102,6 +109,17 @@ Sistemin kendi güvenlik durumunu raporlaması için Telegram üzerinden:
 Bu rapor model tarafından üretilmez; mevcut kod sabitlerinden ve
 yapılandırma değerlerinden okunur.
 
+Kod ile politikanın hâlâ uyumlu olduğunu çalışırken sınamak için:
+
+```
+/denetle
+```
+
+On kontrol çalışır. Deterministik ve kritik bir bulgu ilgili yeteneği
+kapatır — `/saglik` raporunda hangi yeteneğin kapalı olduğu görünür.
+Denetim başlangıçta da çalışır, ama taban çizgisi yalnızca `/denetle`
+ile ilerler: bir insan raporu görmeden yeni hâl "normal" sayılmaz.
+
 ---
 
 ## Bilinen Eksikler
@@ -123,6 +141,17 @@ yapılandırma değerlerinden okunur.
 - LiteLLM proxy'si ayrı bir bağımlılıktır; Mart 2026'da tedarik zinciri
   saldırısına uğradığı için sürüm sabitlenmiş ve güncellemeler elle
   gözden geçirilerek yapılmaktadır
+- Sapma denetçisi **çalışan sistemi** denetler, diskteki dosyayı değil.
+  Politika konteyner imajına gömülü olduğu için normalde ikisi aynıdır;
+  `policies/` dışarıdan bağlanırsa ayrışabilirler ve denetçi bunu
+  içeriden göremez — karşılaştıracağı ikinci bir kopya yoktur
+- Sapma denetçisinin sezgisel kontrolü (hata oranı) asla durdurmaz;
+  bedeli, gerçek bir saldırı örüntüsünün yalnızca raporlanmasıdır
+- Zaman içinde sapma tespiti kasıtlı değişiklik ile kötü niyetli
+  değişikliği ayırt etmez; ayırt edenler kural tabanlı kontrollerdir
+- Yetenek geçersiz kılma süresi dolunca yeniden kapanır, ancak operatör
+  komutu tekrar çalıştırabilir; engellenmedi çünkü engellenseydi kodu
+  değiştirmek tek yol kalırdı
 
 Güncel liste için `/guvenlik` raporunun "Gerçekçi Sıradaki
 İyileştirmeler" bölümüne bakınız.
@@ -148,3 +177,10 @@ Bu sistem, çalıştıran kişinin şu önlemleri almasını varsayar:
   duyuruları kontrol edilmelidir; yeni yayınlanmış sürümler hemen
   alınmamalıdır
   (bkz. THREAT-MAPPING.md → Kontrol 6)
+- `policies/data_classification.yaml` düzenlendikten sonra
+  `/denetle` çalıştırılmalıdır. YAML'da girinti kayması sessiz bir
+  hatadır: aynı sözlükte tekrar eden anahtar üstündekini uyarısız ezer
+- `SOVEREIGN_OVERRIDE_TTL_SECONDS` uzun bir değere çekilmemelidir;
+  süresiz geçersiz kılma, kontrolü silmekle aynı şeydir
+- `/gecersiz_kil` sonrası asıl sapma düzeltilmelidir; geçersiz kılma
+  sapmayı ortadan kaldırmaz, yalnızca geçici olarak yok sayar
