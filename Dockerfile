@@ -28,6 +28,9 @@ COPY memory.py .
 COPY rag.py .
 COPY sovereign.py .
 COPY sovereign_store.py .
+COPY audit_chain.py .
+COPY audit_store.py .
+COPY kanit.py .
 COPY litellm ./litellm
 
 # Security: Non-root user oluştur

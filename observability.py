@@ -122,10 +122,26 @@ class ObservabilityStore:
         return "\n".join(lines)
 
 
-def mask_user_id(user_id: str) -> str:
-    if not user_id:
+# Botun kendi yaptigi isler (acilis denetimi, yazicinin gozlemleri) ize
+# bu adla yazilir. Bir kimlik degil, maskelenecek bir sey yok: Telegram
+# kimlikleri sayidir, bu adla carpismaz.
+SISTEM_KIMLIGI = "sistem"
+
+
+def mask_user_id(user_id: object) -> str:
+    """Kimligin son uc hanesini birakir: 987654321 -> ***321.
+
+    HER TURU KABUL EDER. Telegram kimligi bir SAYIDIR
+    (update.effective_user.id); bu fonksiyon yalnizca metin kabul
+    ettiginde message_handler her mesajda TypeError firlatti ve bot
+    sustu -- 478 test yesilken.
+    """
+    metin = "" if user_id is None else str(user_id)
+    if metin == SISTEM_KIMLIGI:
+        return metin
+    if not metin:
         return "***"
-    return f"***{user_id[-3:]}" if len(user_id) > 3 else "***"
+    return f"***{metin[-3:]}" if len(metin) > 3 else "***"
 
 
 def format_counter_lines(counter: Counter[str], prefix: str = "") -> list[str]:

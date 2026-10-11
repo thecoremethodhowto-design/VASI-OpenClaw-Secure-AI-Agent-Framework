@@ -32,6 +32,8 @@ from observability import (
     HealthCheck,
     ObservabilityStore,
     format_health_report,
+    mask_user_id,
+    SISTEM_KIMLIGI,
     skills_health,
     timed_check,
     workspace_health,
@@ -128,6 +130,8 @@ import rag
 # ── SOVEREIGN KATMANI ─────────────────────────────────────────────────────────
 import sovereign
 import sovereign_store
+import audit_chain
+import audit_store
 
 # ── DECISION KATMANI (DACE) ───────────────────────────────────────────────────
 import decision
@@ -149,7 +153,10 @@ PENDING_ACTION_TTL_SECONDS = int(os.getenv("PENDING_ACTION_TTL_SECONDS", "600"))
 # Bir yetenegin gecersiz kilinmasi ne kadar surer?
 # Suresiz gecersiz kilma, kontrolu silmektir -- adi kalir, kendisi kalmaz.
 SOVEREIGN_OVERRIDE_TTL_SECONDS = int(os.getenv("SOVEREIGN_OVERRIDE_TTL_SECONDS", "1800"))
-LOG_FILE = Path(os.getenv("VASI_LOG_FILE", "/tmp/vasi_audit.log"))
+# Genel log. Eski adi "vasi_audit.log" idi -- denetim izi ayri dosyaya
+# tasininca adinda "audit" yazan dosya denetim izi olmaktan cikti.
+# Yanlis bir iddia dosya adinda da durabilir.
+LOG_FILE = Path(os.getenv("VASI_LOG_FILE", "/tmp/vasi.log"))
 NOTES_FILE = os.getenv("VASI_NOTES_FILE", "notlar/NOTES.md")
 CHANNEL_STYLE_FILE = os.getenv("VASI_CHANNEL_STYLE_FILE", "skills/youtube_icerik.md")
 CODE_STYLE_FILE = os.getenv("VASI_CODE_STYLE_FILE", "skills/kod_yardimcisi.md")
@@ -168,7 +175,14 @@ gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 # Varsayilan 10 MB x 5 dosya = en fazla 50 MB disk.
 LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(10 * 1024 * 1024)))
 LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "5"))
-AUDIT_LOG_FILE = os.getenv("AUDIT_LOG_FILE", "/tmp/vasi_audit.log")
+# Denetim izi GENEL LOGDAN AYRI bir dosyada tutulur.
+#
+# Onceki hali ikisine de ayni varsayilani veriyordu, yani iki ayri
+# yazici tek dosyaya bagliydi ve her AUDIT satiri iki kez dusuyordu.
+# Niyet kodun kendi yorumunda yaziliydi ("AYRICA kendi dosyasina"),
+# davranista yoktu. Iki varsayilan ayni kaldigi surece o yorum bir
+# dilek olarak kalir.
+AUDIT_LOG_FILE = os.getenv("AUDIT_LOG_FILE", "/tmp/vasi_denetim.log")
 
 _log_bicimi = logging.Formatter(
     "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -197,13 +211,140 @@ logging.basicConfig(
     handlers=[_doner_dosya(LOG_FILE), logging.StreamHandler()],
 )
 logger = logging.getLogger("vasi")
+# Denetim izinin seviyesi IZI YAZAN logger'in kendi ozelligi -- kok
+# logger'in tesadufu degil. logging.basicConfig, kok logger'a ondan once
+# BIR SEY dokunduysa (bir kutuphane, bir test calistirici) HATA VERMEDEN
+# hicbir sey yapmaz; kok seviyesi WARNING kalir ve her audit_event()
+# (INFO) sessizce yutulur. Olculdu: kok onceden yapilandirilinca izde
+# 0 satir. Bunu, testler alfabetik sirada baska bir yere dusunce bulduk.
+logger.setLevel(logging.INFO)
 
 # Audit satirlari AYRICA kendi dosyasina yazilir. Genel logdan da
 # silinmez -- olay sirasi orada korunur. Amac, denetim kayitlarini
 # gurultuden ayirip daha uzun sure saklayabilmek.
-_audit_yazici = _doner_dosya(AUDIT_LOG_FILE)
-_audit_yazici.addFilter(_SadeceAudit())
-logger.addHandler(_audit_yazici)
+#
+# IKI KURAL, ikisi de mekanizmada -- ayarda degil:
+#
+# 1) Iki yol AYNI dosyayi gosteriyorsa ikinci yazici EKLENMEZ. Genel
+#    log AUDIT satirlarini zaten iceriyor; ikinci yazici her satiri
+#    iki kez dusurur. Varsayilani duzeltmek yetmez -- biri .env'de
+#    ikisini ayni yapabilir.
+#
+# 2) Kurulum tekrar calistirilabilir olmali. logging.getLogger("vasi")
+#    her seferinde AYNI nesneyi dondurur; modul yeniden yuklendiginde
+#    (testler bunu ~400 kez yapiyor) yeni bir yazici daha eklenir ve
+#    eskisi acik kalir. Olculdu: bes yuklemede bes yazici.
+for _eski in list(logger.handlers):
+    if getattr(_eski, "_vasi_denetim_yazicisi", False):
+        logger.removeHandler(_eski)
+        _eski.close()
+
+#
+# 3) Istenen yola yazilamiyorsa bot COKMEZ, ama sessizce de gecmez:
+#    gecici yola duser, bunu yuksek sesle soyler, ve /saglik ile
+#    /guvenlik bunu gosterir. Bozuk bir birim ayari botu durdurmamali;
+#    denetim izinin kalici olmadigini gizlemek de olmamali.
+AUDIT_YEDEK_YOL = os.getenv("AUDIT_YEDEK_LOG_FILE", "/tmp/vasi_denetim.log")
+AUDIT_ISTENEN_YOL = AUDIT_LOG_FILE
+AUDIT_YEDEGE_DUSTU = False
+
+
+def _ayri_mi(a, b) -> bool:
+    return Path(a).resolve() != Path(b).resolve()
+
+
+def _audit_yazicisi_ac(yol: str) -> logging.Handler:
+    """Denetim izi yazicisi: her satira sira ve ozet ekler (audit_chain).
+
+    Genel log zincirsiz kalir; zincir yalnizca denetim dosyasinda.
+    Yeniden baslatmada zincir dosyadaki son halkadan devam eder.
+    """
+    Path(yol).parent.mkdir(parents=True, exist_ok=True)
+    h = audit_chain.ZincirliDosyaYazicisi(
+        yol, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8"
+    )
+    h.setFormatter(_log_bicimi)
+    return h
+
+
+_audit_yazici = None
+if _ayri_mi(AUDIT_LOG_FILE, LOG_FILE):
+    try:
+        _audit_yazici = _audit_yazicisi_ac(AUDIT_LOG_FILE)
+    except OSError as _hata:
+        AUDIT_LOG_FILE = AUDIT_YEDEK_YOL
+        AUDIT_YEDEGE_DUSTU = True
+        logger.warning(
+            f"⚠️ Denetim izi istenen yola yazilamiyor ({AUDIT_ISTENEN_YOL}: "
+            f"{_hata}). GECICI yola dusuldu: {AUDIT_LOG_FILE} -- bu iz "
+            f"yeniden baslatmada silinir."
+        )
+        if _ayri_mi(AUDIT_LOG_FILE, LOG_FILE):
+            _audit_yazici = _audit_yazicisi_ac(AUDIT_LOG_FILE)
+
+AUDIT_AYRI_DOSYADA = _audit_yazici is not None
+if AUDIT_AYRI_DOSYADA:
+    _audit_yazici.addFilter(_SadeceAudit())
+    _audit_yazici._vasi_denetim_yazicisi = True
+    logger.addHandler(_audit_yazici)
+else:
+    logger.warning(
+        "⚠️ AUDIT_LOG_FILE ile VASI_LOG_FILE ayni dosyayi gosteriyor; "
+        "denetim izi yalnizca genel logda tutulacak (cift yazma onlendi)."
+    )
+
+
+# ── DENETIM IZININ KALICILIGI ────────────────────────────────────────────────
+#
+# Olcum, varsayim degil: denetim izi hangi dosya sisteminde duruyor?
+# /proc/mounts calisan sistemin GERCEK baglama tablosu -- compose
+# dosyasinin ne dedigi degil, cekirdegin ne yaptigi.
+#
+# Bu soru sorulmadan once iz /tmp'deydi ve /tmp bir tmpfs'ti: bellekte
+# yasayan, her yeniden baslatmada sifirlanan bir dosya sistemi. Denetim
+# izi, sistemin kendi gecmisini her acilista unutuyordu.
+
+GECICI_DOSYA_SISTEMLERI = frozenset({"tmpfs", "ramfs"})
+
+
+def dosya_sistemi_turu(yol, baglamalar: str | None = None) -> str | None:
+    """Yolun bagli oldugu dosya sisteminin turu ('tmpfs', 'ext4', ...).
+
+    En uzun eslesen baglama noktasi kazanir: /app/denetim ayri bagliysa
+    / yerine o sayilir. /proc/mounts okunamiyorsa (ornegin macOS) None:
+    bilinmiyor, ve bilinmiyor 'kalici' anlamina GELMEZ.
+    """
+    if baglamalar is None:
+        try:
+            baglamalar = Path("/proc/mounts").read_text(encoding="utf-8")
+        except OSError:
+            return None
+    hedef = str(Path(yol).resolve())
+    en_uzun, tur = None, None
+    for satir in baglamalar.splitlines():
+        parcalar = satir.split()
+        if len(parcalar) < 3:
+            continue
+        nokta = parcalar[1].replace("\\040", " ")
+        kapsiyor = hedef == nokta or hedef.startswith(nokta.rstrip("/") + "/")
+        if kapsiyor and (en_uzun is None or len(nokta) > len(en_uzun)):
+            en_uzun, tur = nokta, parcalar[2]
+    return tur
+
+
+def denetim_izi_durumu() -> tuple[str, str]:
+    """(durum, aciklama): 'kalici' | 'gecici' | 'yedek' | 'bilinmiyor'."""
+    if AUDIT_YEDEGE_DUSTU:
+        return "yedek", (
+            f"istenen yola yazılamadı ({AUDIT_ISTENEN_YOL}); geçici yolda, "
+            f"yeniden başlatmada silinir"
+        )
+    tur = dosya_sistemi_turu(AUDIT_LOG_FILE)
+    if tur is None:
+        return "bilinmiyor", "kalıcılığı doğrulanamadı"
+    if tur in GECICI_DOSYA_SISTEMLERI:
+        return "gecici", f"geçici bellekte ({tur}), yeniden başlatmada silinir"
+    return "kalici", f"kalıcı · {Path(AUDIT_LOG_FILE).parent}"
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext").setLevel(logging.INFO)
@@ -240,6 +381,8 @@ Komutlar:
 /siniflandir <dosya> - Dosyanın veri sınıfını ve Gemini aktarım iznini gösterir
 /temizle - Konuşma geçmişini sıfırlar\n/hatirla <bilgi> - Kalıcı bir hatıra kaydeder (onay ister)\n/hatirlananlar - Kayıtlı hatıraları listeler\n/unut <numara> - Bir hatırayı pasifleştirir (onay ister)\n/indeksle - Belgeleri RAG indeksine ekler (politikanın izin verdikleri)\n/bul <sorgu> - İndekste anlamsal arama (model kullanmaz)\n/sor <soru> - Belgelerine dayalı cevap (yerel model, araçsız)\n/denetle - Kod, politika ve yapılandırma uyumunu denetler\n/gecersiz_kil <yetenek> - Kapatılmış bir yeteneği geçici açar (onay ister)
 /saglik - Bileşen sağlık durumunu gösterir
+/iz_dogrula - Denetim izini veritabanındaki kopyasıyla halka halka karşılaştırır
+/iz_onayla - Denetim izindeki bulguları "gördüm, inceledim" diye onaylar (onay ister)
 /istatistik - Komut, hata ve model kullanım özetini gösterir
 /audit_ozet - Son olay ve audit özetini gösterir
 /rapor <konu> - Rapor taslağı üretir, onayla kaydeder
@@ -250,13 +393,36 @@ Komutlar:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+# AUDIT satirinin alan ayiricisi. Ayrintinin icinden gecen bir '|'
+# satiri ayristiran her seye fazladan alan gosterir -- izin icine
+# sahte alan sokmanin yolu budur. Degistirilen karakter gorsel olarak
+# benzer, boylece satir okunakliligini kaybetmez.
+AUDIT_AYIRICI = "|"
+_AYIRICI_YERINE = "¦"
+
+
 def sanitize_for_log(text: str, max_len: int = 240) -> str:
     cleaned = " ".join(text.replace("\n", " ").split())
+    cleaned = cleaned.replace(AUDIT_AYIRICI, _AYIRICI_YERINE)
     return cleaned[:max_len]
 
-def audit_event(event: str, user_id: str, detail: str) -> None:
-    logger.info(f"AUDIT | {event} | user={user_id} | {sanitize_for_log(detail)}")
-    OBSERVABILITY.record_audit(event, user_id, sanitize_for_log(detail))
+
+def audit_event(event: str, user_id: str, detail: str, max_len: int = 240) -> None:
+    """Denetim izine bir satir yazar.
+
+    KIMLIK MASKELENIR. Gerekce: bu sistem tek kullaniciya kilitli
+    (MY_TELEGRAM_ID), yani satirdaki kimlik hicbir soruyu
+    cevaplamiyor -- kim oldugu zaten belli. Buna karsilik log
+    dosyasi ekran goruntusune, video karesine ve depoya giriyor.
+    Hicbir sey kazandirmayan, her yerde sizan bir alan.
+
+    YETKISIZ ERISIM DENEMELERI BU YOLDAN GECMEZ: onlar access.py
+    icinde logger.warning ile ve MASKESIZ yazilir. Orada kimlik
+    gercek bir soruyu cevapliyor -- kim denedi.
+    """
+    temiz = sanitize_for_log(detail, max_len)
+    logger.info(f"AUDIT | {event} | user={mask_user_id(user_id)} | {temiz}")
+    OBSERVABILITY.record_audit(event, user_id, temiz)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -387,6 +553,17 @@ def is_pending_expired(pending: dict) -> bool:
 
 
 def build_security_report() -> str:
+    _, kalicilik = denetim_izi_durumu()
+    _zincir = denetim_zinciri_raporu()
+    zincir_durumu = (
+        f"her satır bir öncekinin özetini taşır, {audit_chain.ozet_satiri(_zincir)}"
+        if _zincir is not None else "zincir yok"
+    )
+    iz_yeri = (
+        f"genel logdan ayrı dosyada tutulur (`{AUDIT_LOG_FILE}`, {kalicilik})"
+        if AUDIT_AYRI_DOSYADA
+        else f"genel logda tutulur (iki yol aynı dosyayı gösteriyor; çift yazma önlendi; {kalicilik})"
+    )
     ollama_host = urlparse(OLLAMA_HOST).hostname or ""
     ollama_scope = "yerel/izinli" if ollama_host in LOCAL_OLLAMA_HOSTS else "uzak"
     api_key_state = "var" if bool(OLLAMA_API_KEY) else "yok"
@@ -410,6 +587,32 @@ def build_security_report() -> str:
     sovereign_state = YETENEK_KAPISI.durum_satiri()
     _iz_durum, _iz_detay = sovereign_store.health()
     iz_state = _iz_detay
+    # Iddia DAVRANISTAN turer: yaziciya gercekten bir tanik bagli mi?
+    if AUDIT_AYRI_DOSYADA and getattr(_audit_yazici, "tanik", None) is not None:
+        _tanik_ozeti, _ = denetim_tanigi_ozeti(_zincir)
+        tanik_state = (
+            "Denetim izinin her halkası veritabanında da tutulur (`denetim_zinciri`, "
+            "yalnızca ekleme kabul eder: güncelleme, silme ve boşaltma reddedilir; bu kural "
+            "kazalara karşıdır, tablonun sahibine değil). Bot dururken dosyadan silinen ya "
+            "da baştan hesaplanan halkalar `/iz_dogrula` ve `/saglik` ile yakalanır; yazıcı "
+            "yeniden başlarken zinciri tanığın ucundan sürdürür. Tanığın doğum kaydı "
+            "dosyadadır: tanık silinir ya da başı kesilirse bu ize alarm olarak yazılır. "
+            "Tanık kapalıyken yazılan halkalar, tanık dönünce ona sonradan yazılır. "
+            f"Durum: {_tanik_ozeti}."
+        )
+    elif not memory.is_configured():
+        tanik_state = ("Kapalı (PostgreSQL yok): zincir yalnızca dosyada; bot dururken "
+                       "yapılan değişiklik yakalanamaz.")
+    else:
+        tanik_state = ("Bağlı değil: PostgreSQL yapılandırılmış ama yazıcıya tanık "
+                       "bağlanmamış; bot dururken yapılan değişiklik yakalanamaz.")
+
+    # Iddia DAVRANISTAN: komut gercekten onay istiyor mu?
+    iz_onay_kapisi = (
+        "Telegram onay butonuyla"
+        if "iz_onayla" in ONAY_GEREKEN_KOMUTLAR and "iz_onayla" in _onay_isteyen_komutlar()
+        else "ONAY İSTEMEDEN"
+    )
 
     return f"""# Vasi Güvenlik Durumu
 
@@ -449,21 +652,23 @@ def build_security_report() -> str:
 - RAG politika filtresi: İndeksleme ve arama, her ikisinde de `rag_allowed` kontrol edilir; politika değişirse eski parçalar aramada çıkmaz.
 - RAG köken etiketi: Web aramasından üretilen dosyalar `web_kaynakli` işaretlenir ve sonuçlarda görünür.
 - Sınıflandırma önceliği: Birden fazla desene uyan dosyada en kısıtlayıcı sınıf kazanır (`SINIF_ONCELIGI`).
-- Sapma denetçisi: `/denetle` kod, politika ve yapılandırma uyumunu sınar; başlangıçta da çalışır. Deterministik + kritik bir bulgu ilgili yeteneği kapatır. {sovereign_state}
-- Denetim izi: {iz_state}. Her denetimde parmak izi yazılır; bir sonraki denetim farkı bildirir. Değişiklik kendiliğinden sapma sayılmaz (BİLGİ seviyesi, hiçbir yeteneği kapatmaz).
+- Sapma denetçisi: `/denetle` kod, politika ve yapılandırma uyumunu sınar; başlangıçta da çalışır. Deterministik + kritik bir bulgu ilgili yeteneği kapatır. Denetim izinin kalıcılığını, zincirini ve tanığını da sınar; bu bulgular yalnızca raporlanır, hiçbir yeteneği kapatmaz. {sovereign_state}
+- Parmak izi geçmişi: {iz_state}. Her denetimde parmak izi yazılır; bir sonraki denetim farkı bildirir. Değişiklik kendiliğinden sapma sayılmaz (BİLGİ seviyesi, hiçbir yeteneği kapatmaz).
 - Geçersiz kılma sınırı: `/gecersiz_kil` onay ister, denetim günlüğüne yazılır ve {SOVEREIGN_OVERRIDE_TTL_SECONDS // 60} dakika sonra kendiliğinden kalkar; süresiz kapatma yoktur.
 - Docker hardening: `read_only`, `tmpfs /tmp`, `no-new-privileges`, `cap_drop: ALL` compose dosyasında tanımlı.
 - Sır koruması: `.env` git/docker ignore içinde; loglarda `httpx` Telegram URL logları susturuldu.
-- Audit izi: Hassas içerik maskeleyen `AUDIT` satırları tutulur.
+- Audit izi: `AUDIT` satırları {iz_yeri}; {zincir_durumu}; içerik `sanitize_for_log()` ile temizlenir, alan ayırıcı kaçırılır. Yetkili kullanıcının kimliği her yerde maskelenir (`***123`); yetkisiz erişim denemeleri maskesiz kaydedilir. Sohbet içeriği loglara yazılmaz.
+- İkinci tanık: {tanik_state}
+- İz onayı: `/iz_onayla` bulguları SİLMEZ; "gördüm, inceledim" kaydını {iz_onay_kapisi} zincire ve tanığa ekler. Onay, gösterilen bulguları kimlikleriyle listeler ve yalnızca onları onaylar; bir sıra aralığını değil. Onaylanan bulgular "onaylanmış geçmiş" olarak görünmeye devam eder; onaydan sonraki her müdahale, eski satırlara bile olsa, yeniden uyarır.
+- Açılış kaydı: Her açılış ve açılışta kapatılan her yetenek `user=sistem` olarak ize yazılır; bot dururken dosyaya dokunulduysa boşluk ilk komutu beklemeden dosyaya geçer.
 - Ollama host: `{OLLAMA_HOST}` ({ollama_scope}); API key durumu: {api_key_state}. Uzak host key olmadan başlatılmaz.
 - Gemini API key durumu: {"var" if bool(GEMINI_API_KEY) else "yok"}; model: `{GEMINI_MODEL}`.
 
 ## Gerçekçi Sıradaki İyileştirmeler
-1. Audit satırlarını merkezi bir log sistemine yönlendir (şu an yerel dosyada).
-2. Kırmızı takım değerlendirmesi yap: testler kontrollerin yazıldığı gibi çalıştığını doğrular.
+1. İkinci tanık aynı makinede ve bot veritabanına tablonun sahibi olarak bağlanıyor: tanığın yalnızca-ekleme kuralı kazalara karşıdır; tablo tek komutla silinebilir. Silinirse ya da başı kesilirse bot bunu ize alarm olarak yazar ("tanık sıfırlanmış"). Ama dosyaya VE veritabanına birlikte yazabilen biri (sunucuya tam erişimi olan) yakalanmaz: ikisini birlikte yeniden yazabilir, birlikte eski bir hâline döndürebilir (dosyayı tanık öncesine kesip tabloyu silmek ilk kurulumdan ayırt edilemez) ya da ikisine birden bir onay satırı ekleyebilir (onay anahtarsızdır). Sıradaki adımlar: tanığa yalnızca ekleme yetkisi olan ayrı bir veritabanı hesabı ve zincirin ucunu düzenli aralıklarla makine dışına çapalamak (başka bir sunucu ya da imzalı zaman damgası). Tanık kapalıyken bot da durdurulursa o aradaki halkaların tek tanığı dosyadır. Tanık, kurulduğu andan önceki halkaları doğrulayamaz. Rotasyon ({LOG_MAX_BYTES // (1024*1024)} MB × {LOG_BACKUP_COUNT} yedek) en eski kayıtları siler; her yeni dosya bir dönme kaydıyla başlar ve baş eksikliği ancak böyle bir kayıtla başlıyorsa rotasyon sayılır. Bütün bir eski dosyanın silinmesini dosya tek başına göremez; tanık, kendi dönme kayıtlarını sayarak görür (en eski yedeğinkini bir sonraki rotasyona kadar: o dosya o rotasyonda zaten silinecekti). Mac'teki doğrulayıcının 0 çıkış kodu, onaylı geçmişin gerçek olduğunu kanıtlamaz; onayın sahtesini yalnızca tanık ayırt eder.
+2. Denetim izi iki kez bağımsız bir incelemeyle kırılmaya çalışıldı (4 ve 5 Ekim 2026); bulunanlar kapatıldı ya da yukarıda sınır olarak yazıldı. Sistemin geri kalanı için kırmızı takım değerlendirmesi yapılmadı: testler kontrollerin yazıldığı gibi çalıştığını doğrular, kararlı bir saldırgana karşı yeterli olduğunu değil.
 3. Hafıza türlerini ayrıştır: şema `fact` ve `context` türlerini tanımlıyor ama hepsi `preference` olarak yazılıyor.
 4. RAG benzerlik eşiği (`RAG_MIN_SCORE`) tek bir veri kümesine göre seçildi; içerik değişirse ayarlanmalı.
-5. Sovereign / Denetçi katmanı: bağımsız bir denetim mekanizması.
 ## Not
 Bu rapor model tarafından tahmin edilmez; mevcut kod sabitlerinden ve güvenlik ayarlarından üretilir.
 Yukarıdaki iyileştirme listesi elle güncellenir.
@@ -569,8 +774,118 @@ def build_health_report() -> str:
         build_memory_health(),
         build_rag_health(),
         build_sovereign_health(),
+        build_denetim_izi_health(),
     ]
     return format_health_report(checks, OBSERVABILITY.last_command_summary())
+
+
+def build_denetim_izi_health() -> HealthCheck:
+    """Denetim izinin nerede ve ne kadar kalici durdugu.
+
+    Tahmin degil olcum: /proc/mounts'tan okunur. 'Bilinmiyor' da bir
+    uyaridir -- dogrulanamayan bir kalicilik, kalicilik degildir.
+    """
+    durum, aciklama = denetim_izi_durumu()
+    zincir = denetim_zinciri_raporu()
+    zincir_satiri = (audit_chain.ozet_satiri(zincir) if zincir is not None
+                     else "zincir yok (iz genel logda)")
+    # 'temiz', 'saglam'dan fazlasini ister: zincir tutarli olsa bile
+    # yazici calisirken dosyaya disaridan dokunulduysa yesil yanmaz.
+    temiz = zincir is not None and zincir.temiz
+
+    tanik_satiri, tanik_tamam = denetim_tanigi_ozeti(zincir)
+    return HealthCheck(
+        "Denetim izi",
+        "ok" if durum == "kalici" and temiz and tanik_tamam else "warn",
+        details=f"{aciklama} · {zincir_satiri} · {tanik_satiri}",
+    )
+
+
+def denetim_tanigi_karsilastirmasi(dosya_raporu=None):
+    """(karsilastirma, tanik_raporu, not, yalnizca_bilgi_mi).
+
+    Tanik yoksa ilk ikisi None. Son deger: bu yokluk BEKLENEN bir durum
+    mu (PostgreSQL hic yapilandirilmamis), yoksa bir sorun mu.
+
+    Her cagrida iki kopya da bastan okunur: onbellek yok. Bot dururken
+    biri dosyaya dokunduysa bir sonraki /saglik bunu gormeli.
+    """
+    if not AUDIT_AYRI_DOSYADA:
+        return None, None, "tanık yok (iz genel logda)", True
+    tanik = getattr(_audit_yazici, "tanik", None)
+    if tanik is None:
+        if not memory.is_configured():
+            return None, None, "tanık yok (PostgreSQL kapalı)", True
+        return None, None, "tanık bağlı değil", False
+    try:
+        halkalar = tanik.halkalar()
+    except Exception as e:
+        return None, None, f"tanık okunamadı: {' '.join(str(e).split())[:120]}", False
+    if dosya_raporu is None:
+        dosya_raporu = denetim_zinciri_raporu()
+    # Onaylar ve tanigin dogum kaydi DOSYADAN gelir: onay dosyadan
+    # silinmisse hicbir fark onayli sayilmaz -- temkinli taraf. Rotasyonla
+    # gitmis olmasi gereken halkalari ise tanigin kendi donme kayitlari ve
+    # yedek sayisi soyler: butun bir eski dosyanin silinmesini dosya goremez.
+    k, tanik_r = audit_chain.iki_tanigi_karsilastir(dosya_raporu, halkalar,
+                                                     yedek_sayisi=LOG_BACKUP_COUNT)
+    return k, tanik_r, None, False
+
+
+def denetim_tanigi_ozeti(dosya_raporu=None) -> tuple[str, bool]:
+    """(saglik satiri parcasi, tamam mi).
+
+    PostgreSQL hic yapilandirilmamissa bu bir BILGI, uyari degil: kok
+    sebep zaten PostgreSQL satirinda uyari olarak gorunuyor. Ama tanik
+    BEKLENIRKEN yoksa, okunamiyorsa ya da uyusmuyorsa uyaridir.
+    """
+    k, tanik_r, not_, yalnizca_bilgi = denetim_tanigi_karsilastirmasi(dosya_raporu)
+    if k is None:
+        return not_, yalnizca_bilgi
+    satir = audit_chain.tanik_ozet_satiri(k, tanik_r)
+    tamam = k.uyusuyor and tanik_r.saglam
+    yazici_notu = getattr(_audit_yazici, "tanik_durumu", None)
+    if yazici_notu:
+        satir += f" · {yazici_notu[:120]}"
+        tamam = False
+    return satir, tamam
+
+
+def iz_dogrulama_raporu() -> tuple[str, str]:
+    """(/iz_dogrula metni, denetim satiri icin kisa durum)."""
+    if not AUDIT_AYRI_DOSYADA:
+        return ("Denetim izi ayrı bir dosyada tutulmuyor; zincir ve tanık yok.",
+                "zincir_yok")
+    dosya_r = denetim_zinciri_raporu()
+    k, tanik_r, not_, _ = denetim_tanigi_karsilastirmasi(dosya_r)
+    if k is None:
+        return (f"{audit_chain.rapor_metni(dosya_r, Path(AUDIT_LOG_FILE).name)}\n\n"
+                f"⚠️ İkinci tanıkla karşılaştırılamadı: {not_}.",
+                "tanik_yok")
+    metin = audit_chain.karsilastirma_metni(k, dosya_r, tanik_r)
+    yazici_notu = getattr(_audit_yazici, "tanik_durumu", None)
+    if yazici_notu:
+        metin += f"\n⚠️ Yazıcının son tanık notu: {yazici_notu}"
+    if k.uyusuyor and tanik_r.saglam and dosya_r.temiz and not yazici_notu:
+        durum = f"uyusuyor={k.eslesen}"
+    else:
+        durum = (f"dosyada_yok={len(k.dosyada_yok)} farkli={len(k.farkli)} "
+                 f"taniksiz={len(k.taniksiz)} dosya_temiz={'evet' if dosya_r.temiz else 'hayir'}")
+    return metin, durum
+
+
+def denetim_zinciri_raporu():
+    """Denetim dosyasinin zincir dogrulamasi; ayri dosya yoksa None.
+
+    Her cagrida dosyanin TAMAMI okunur: onbellek yok. Az once biri
+    bir satiri degistirdiyse bir sonraki /saglik bunu gormeli.
+    """
+    if not AUDIT_AYRI_DOSYADA:
+        return None
+    # Baslangic eksikligi ancak dosyalar gecerli bir donme kaydiyla
+    # basliyorsa rotasyondur. Kac dosyanin gitmis olmasi gerektigini tanik
+    # bilir: yedek sayisi karsilastirmaya verilir (denetim_tanigi_karsilastirmasi).
+    return audit_chain.dogrula_dosyalar(audit_chain.dosyalari_sirala(AUDIT_LOG_FILE))
 
 def get_ollama_model_names() -> list[str]:
     response = ollama_client.list()
@@ -603,7 +918,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_rate_limit(str(update.effective_user.id)):
         await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
         return
-    logger.info(f"👤 Başlangıç komutu: {update.effective_user.id}")
+    logger.info(f"👤 Başlangıç komutu: {mask_user_id(str(update.effective_user.id))}")
     await update.message.reply_text(HELP_TEXT)
 
 async def cmd_yardim(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -615,7 +930,7 @@ async def cmd_liste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_rate_limit(str(update.effective_user.id)):
         await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
         return
-    logger.info(f"📋 Liste komutu: {update.effective_user.id}")
+    logger.info(f"📋 Liste komutu: {mask_user_id(str(update.effective_user.id))}")
     await update.message.reply_text(list_workspace_files(scope="general"))
 
 async def cmd_oku(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1015,14 +1330,11 @@ async def cmd_hatirla(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     audit_event("remember_request", str(update.effective_user.id), icerik[:120])
-    if not model_ciktisi_kaydedilebilir(sonuc):
-        await _uretim_basarisiz(update, sonuc)
-        return
 
     preview, keyboard = set_pending(
         context, "remember",
         f"🧠 Şu kalıcı olarak hatırlansın mı?\n\n{icerik}\n\n"
-        f"_Not: Bu bilgi sonraki her oturumda modele gönderilecek._",
+        f"Not: Bu bilgi sonraki her oturumda modele gönderilecek.",
         content=icerik,
     )
     await update.message.reply_text(preview, reply_markup=keyboard)
@@ -1054,7 +1366,7 @@ async def cmd_hatirlananlar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     satirlar = ["🧠 Kayıtlı hatıralar:\n"]
     for k in kayitlar:
         tarih = k["created_at"].strftime("%d.%m.%Y")
-        satirlar.append(f"#{k['id']} — {k['content']}\n    _{tarih}_")
+        satirlar.append(f"#{k['id']} — {k['content']}\n    {tarih}")
     satirlar.append("\nSilmek için: /unut <numara>")
     await update.message.reply_text("\n".join(satirlar))
 
@@ -1095,7 +1407,7 @@ async def cmd_unut(update: Update, context: ContextTypes.DEFAULT_TYPE):
     preview, keyboard = set_pending(
         context, "forget",
         f"🗑️ Şu hatıra unutulsun mu?\n\n#{memory_id} — {kayit['content']}\n\n"
-        f"_Not: Bu bilgi bu oturumda konuşulduysa, /temizle de kullanın._",
+        f"Not: Bu bilgi bu oturumda konuşulduysa, /temizle de kullanın.",
         memory_id=memory_id,
     )
     await update.message.reply_text(preview, reply_markup=keyboard)
@@ -1330,6 +1642,9 @@ ONAY_GEREKEN_KOMUTLAR = frozenset({
     # Bir guvenlik kontrolunu gecersiz kilmak, kalici etkisi olan her
     # islemden daha fazla onay hak eder. Denetci bu komutu da denetler.
     "gecersiz_kil",
+    # Kurcalama kanitini "gordum" diye isaretlemek ayni sinifta: sagligi
+    # yesile dondurur. Tek tusla kazayla olmamali.
+    "iz_onayla",
 })
 
 # NOT: /kod_patch bilerek disarida. Dosyaya YAZMAZ; yalnizca bir yama
@@ -1446,7 +1761,45 @@ def guvenlik_anlik_goruntusu() -> dict:
         "komut_sayisi": sum(OBSERVABILITY.command_counts.values()),
         "hata_sayisi": sum(OBSERVABILITY.error_counts.values()),
         **_onceki_iz_alanlari(),
+        **_denetim_izi_alanlari(),
     }
+
+
+def _denetim_izi_alanlari() -> dict:
+    """Denetim izinin durumu, denetcinin okuyacagi bicimde.
+
+    KATMAN NOTU: sovereign.py ne dosyayi ne veritabanini bilir; olcumler
+    buradan gider. Olcum basarisiz olursa denetim DURMAZ: alan 'hata'
+    tasir ve denetci bunu bulgu olarak soyler.
+
+    Izleme alani (IZLENEN_ALANLAR) DEGIL: halka sayisi her komutta
+    degisir; parmak izine girseydi her denetim "sapma var" derdi.
+    """
+    try:
+        durum, aciklama = denetim_izi_durumu()
+        zincir = denetim_zinciri_raporu()
+        z = None if zincir is None else {
+            "saglam": zincir.saglam,
+            "temiz": zincir.temiz,
+            "ozet": audit_chain.ozet_satiri(zincir),
+        }
+        k, tanik_r, not_, yalnizca_bilgi = denetim_tanigi_karsilastirmasi(zincir)
+        if k is None:
+            t = None if yalnizca_bilgi else {"tamam": False, "kritik": False, "ozet": not_}
+        else:
+            yazici_notu = getattr(_audit_yazici, "tanik_durumu", None)
+            ozet = audit_chain.tanik_ozet_satiri(k, tanik_r)
+            t = {
+                "tamam": k.uyusuyor and tanik_r.saglam and not yazici_notu,
+                "kritik": bool(k.dosyada_yok or k.farkli or k.sifirlanmis
+                               or not tanik_r.saglam),
+                "ozet": ozet + (f" · {yazici_notu[:120]}" if yazici_notu else ""),
+            }
+        return {"denetim_izi": {
+            "kalicilik": durum, "kalicilik_aciklama": aciklama, "zincir": z, "tanik": t,
+        }}
+    except Exception as e:
+        return {"denetim_izi": {"hata": " ".join(str(e).split())[:160]}}
 
 
 def _onceki_iz_alanlari() -> dict:
@@ -1626,6 +1979,76 @@ async def cmd_saglik(update: Update, context: ContextTypes.DEFAULT_TYPE):
     report = build_health_report()
     await update.message.reply_text(report)
 
+async def cmd_iz_dogrula(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Denetim izini ikinci taniyla halka halka karsilastirir.
+
+    Rapor ONCE hesaplanir, sonra bu komutun kendi denetim satiri
+    yazilir: cevap, sorulan andaki durumu anlatir.
+    """
+    if not is_authorized(update): return
+    if not check_rate_limit(str(update.effective_user.id)):
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
+        return
+
+    metin, durum = iz_dogrulama_raporu()
+    for i in range(0, len(metin), 3900):
+        await update.message.reply_text(metin[i:i + 3900])
+    audit_event("iz_dogrulama", str(update.effective_user.id), durum)
+
+def iz_onay_ozeti() -> tuple[int, list[str], list[str]]:
+    """Henuz onaylanmamis bulgular: (sayi, okunur satirlar, kimlikler).
+
+    Onay satirina YALNIZCA bu kimlikler yazilir: onay, gosterilen
+    bulgulari onaylar; bir sira araligini degil. Onaydan sonra eski bir
+    satira dokunmak yeni bir bulgudur ve yeniden uyarir.
+    """
+    dosya_r = denetim_zinciri_raporu()
+    k, tanik_r, _, _ = denetim_tanigi_karsilastirmasi(dosya_r)
+    satirlar, kimlikler = audit_chain.acik_bulgular(dosya_r, k, tanik_r)
+    return len(kimlikler), satirlar, kimlikler
+
+
+async def cmd_iz_onayla(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Denetim izindeki bulgulari "gordum, inceledim" diye onaylar. Onay ister.
+
+    Onay hicbir seyi SILMEZ: bulgular "onaylanmis gecmis" olarak gorunmeye
+    devam eder. Yalnizca saglik raporu yesile doner -- ki bir sonraki
+    mudahale, eskilerin gurultusu icinde kaybolmasin. Onay da zincirin bir
+    halkasi: tanikta da durur, sessizce eklenemez.
+    """
+    if not is_authorized(update): return
+    if not check_rate_limit(str(update.effective_user.id)):
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
+        return
+    if not AUDIT_AYRI_DOSYADA:
+        await update.message.reply_text("Denetim izi ayrı bir dosyada tutulmuyor; onaylanacak zincir yok.")
+        return
+
+    user_id = str(update.effective_user.id)
+    # Once istegin kendisi ize yazilir. Bekleyen bir yazici bildirimi varsa
+    # (bot dururken yapilmis bir mudahale) o da bu yazimla dosyaya gecer --
+    # boylece asagidaki liste, onaylanacak HER SEYI icerir.
+    audit_event("iz_onay_istegi", user_id, "-")
+    sayi, satirlar, kimlikler = iz_onay_ozeti()
+    if not sayi:
+        await update.message.reply_text("✅ Onaylanacak bulgu yok: zincir sağlam, tanık uyuşuyor.")
+        return
+
+    kapsam = _audit_yazici.son_sira
+    gosterilen = satirlar[:15]
+    if len(satirlar) > 15:
+        gosterilen.append(f"… ve {len(satirlar) - 15} satır daha")
+    preview, keyboard = set_pending(
+        context, "iz_onayla",
+        "✔ Şu bulgular \"görüldü, incelendi\" olarak işaretlensin mi?\n\n"
+        + "\n".join(gosterilen)
+        + f"\n\nKapsam: sıra ≤ {kapsam}. Yalnızca bu {sayi} bulgu onaylanır; hiçbir "
+          f"satır silinmez, onay da ize ve tanığa yazılır. Bundan sonraki her "
+          f"müdahale, eski satırlara bile olsa, yeniden uyarır.",
+        kapsam=kapsam, bulgu=sayi, kimlikler=kimlikler,
+    )
+    await update.message.reply_text(preview, reply_markup=keyboard)
+
 async def cmd_istatistik(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update): return
     if not check_rate_limit(str(update.effective_user.id)):
@@ -1647,7 +2070,7 @@ async def cmd_audit_ozet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_rapor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update): return
     if not check_rate_limit(str(update.effective_user.id)):
-        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiz. Lütfen bekleyiniz.")
+        await update.message.reply_text("⚠️ Çok hızlı istek gönderdiniz. Lütfen bekleyiniz.")
         return
     
     konu = " ".join(context.args)
@@ -1655,7 +2078,7 @@ async def cmd_rapor(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Kullanım: /rapor <konu>")
         return
     
-    logger.info(f"📊 Rapor komutu: {update.effective_user.id} - Konu: {konu[:50]}")
+    logger.info(f"📊 Rapor komutu: {mask_user_id(str(update.effective_user.id))} ({len(konu)} karakterlik konu)")
     
     try:
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
@@ -1687,7 +2110,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("🚫 Yetkisiz erişim.")
         return
     
-    logger.info(f"🔘 Callback: {query.data} - {update.effective_user.id}")
+    logger.info(f"🔘 Callback: {query.data} - {mask_user_id(str(update.effective_user.id))}")
     user_id = str(update.effective_user.id)
     
     if query.data == "pending:no":
@@ -1740,6 +2163,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"({SOVEREIGN_OVERRIDE_TTL_SECONDS // 60} dakika)\n\n"
                 f"Süre dolunca kendiliğinden yeniden kapanır. Asıl sapma "
                 f"duruyor — /denetle ile görebilirsiniz."
+            )
+        elif action == "iz_onayla":
+            kapsam = pending["kapsam"]
+            ayrinti = audit_chain.onay_ayrintisi(kapsam, pending.get("kimlikler", []))
+            audit_event("iz_onaylandi", user_id, ayrinti, max_len=len(ayrinti))
+            result = (
+                f"✔ Onaylandı: {pending['bulgu']} bulgu (kapsam sıra ≤ {kapsam}).\n\n"
+                f"Geçmiş silinmedi: /iz_dogrula onu 'onaylanmış geçmiş' olarak "
+                f"göstermeye devam eder. Bundan sonraki her müdahale, eski satırlara "
+                f"bile olsa, yeniden uyarır."
             )
         else:
             result = "Hata: Bilinmeyen işlem."
@@ -1822,7 +2255,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     metin = update.message.text
     user_id = update.effective_user.id
-    logger.info(f"💬 Mesaj alındı: {user_id} - {metin[:50]}...")
+    logger.info(f"💬 Mesaj alındı: {mask_user_id(user_id)} ({len(metin)} karakter)")
     
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     
@@ -1856,12 +2289,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Gecmis yalnizca BASARILI bir cevaptan sonra guncellenir.
         context.user_data["sohbet_gecmisi"] = append_turn(gecmis, metin, yanit)
 
-        logger.info(f"✅ Yanıt hazırlandı: {user_id} (Model: {model}, geçmiş: {len(gecmis)//2} tur)")
+        logger.info(f"✅ Yanıt hazırlandı: {mask_user_id(user_id)} (Model: {model}, geçmiş: {len(gecmis)//2} tur)")
         for i in range(0, len(yanit), 4000):
             await update.message.reply_text(f"[{model.upper()}]\n" + yanit[i:i+4000])
 
     except requests.ConnectTimeout:
-        logger.error(f"⏱️ Ollama bağlantı timeout: {user_id}")
+        logger.error(f"⏱️ Ollama bağlantı timeout: {mask_user_id(user_id)}")
         await update.message.reply_text("❌ Model bağlantı zaman aşımı. Lütfen daha sonra deneyin.")
     except requests.RequestException as e:
         logger.error(f"🌐 Ollama iletişim hatası: {e}")
@@ -1914,8 +2347,19 @@ if __name__ == "__main__":
                 sovereign_store.init_schema()
             except memory.MemoryError_ as e:
                 logger.warning(f"⚠️ Sovereign iz semasi kurulamadi: {e}")
+            try:
+                audit_store.init_schema()
+            except Exception as e:
+                logger.warning(f"⚠️ Denetim tanigi semasi kurulamadi: {e}")
         else:
             logger.info("💤 Hafiza kapali (POSTGRES_PASSWORD yok)")
+
+        # IKINCI TANIK. Sema hazir olduktan SONRA baglanir, cunku baglanirken
+        # dosyanin ucu tanikla karsilastirilir: bot dururken dosyaya
+        # dokunulduysa zincir TANIGIN ucundan surer ve bu ize yazilir.
+        # Tanik okunamazsa bot durmaz; hizalama ilk yazimda yeniden denenir.
+        if AUDIT_AYRI_DOSYADA and memory.is_configured():
+            _audit_yazici.tanik_bagla(audit_store.VeritabaniTanigi())
 
         # BASLANGIC DENETIMI. Yapilandirma sapmasi en cok burada onemli:
         # sistem ayaga kalkarken neyi yuklediyse, onunla calisacak.
@@ -1941,6 +2385,7 @@ if __name__ == "__main__":
             _kapanan = YETENEK_KAPISI.uygula(_baslangic_sonucu)
             for _y in sorted(_kapanan):
                 logger.warning(f"🔒 Baslangicta yetenek kapatildi: {_y}")
+                audit_event("sovereign_yetenek_kapandi", SISTEM_KIMLIGI, _y)
 
             # Rapor KAPANAN YETENEGE gore degil, BULGUYA gore verilir.
             # Kapatmayan bir bulgu da bir bulgudur; "temiz" demek yalan
@@ -1954,8 +2399,20 @@ if __name__ == "__main__":
                     logger.warning(f"🛡️ [{_b.onem}] {_b.kontrol}: {_b.mesaj}")
                 if _kapanan:
                     logger.warning(f"🛡️ {YETENEK_KAPISI.durum_satiri()}")
+
+            # HER ACILIS IZE YAZILIR. Dosyayi tek basina kandiran saldiri
+            # bot DURURKEN yapilir; artik her kalkis zincirde ve tanikta.
+            # Yan etkisi: bot dururken dosyaya dokunulduysa bosluk, ilk
+            # komutu beklemeden, acilir acilmaz dosyaya gecer.
+            audit_event(
+                "baslangic_denetimi", SISTEM_KIMLIGI,
+                f"bulgu={len(_baslangic_sonucu.bulgular)} "
+                f"kontrol={_baslangic_sonucu.calisan_kontrol} "
+                f"kapali={','.join(sorted(YETENEK_KAPISI.kapali)) or 'yok'}",
+            )
         except Exception as e:
             logger.error(f"⚠️ Baslangic denetimi calismadi: {e}", exc_info=True)
+            audit_event("baslangic_denetimi", SISTEM_KIMLIGI, f"calismadi: {e}")
 
         logger.info("="*60)
         
@@ -1988,6 +2445,8 @@ if __name__ == "__main__":
         app.add_handler(CommandHandler("denetle", observed_command("denetle", cmd_denetle)))
         app.add_handler(CommandHandler("gecersiz_kil", observed_command("gecersiz_kil", cmd_gecersiz_kil)))
         app.add_handler(CommandHandler("saglik", observed_command("saglik", cmd_saglik)))
+        app.add_handler(CommandHandler("iz_dogrula", observed_command("iz_dogrula", cmd_iz_dogrula)))
+        app.add_handler(CommandHandler("iz_onayla", observed_command("iz_onayla", cmd_iz_onayla)))
         app.add_handler(CommandHandler("istatistik", observed_command("istatistik", cmd_istatistik)))
         app.add_handler(CommandHandler("audit_ozet", observed_command("audit_ozet", cmd_audit_ozet)))
         app.add_handler(CommandHandler("rapor", observed_command("rapor", cmd_rapor)))

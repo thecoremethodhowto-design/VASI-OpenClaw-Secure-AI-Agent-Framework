@@ -25,6 +25,17 @@ def vasi_module(tmp_path, monkeypatch):
     monkeypatch.setenv("PENDING_ACTION_TTL_SECONDS", "30")
     monkeypatch.setenv("GEMINI_DAILY_LIMIT_REQUESTS", "3")
     monkeypatch.delenv("WEB_RADAR_ALLOWLIST", raising=False)
+    # Testler GERCEK denetim izine asla yazmamali. Testler `docker
+    # compose run` ile botun BUTUN ortamini ve birimlerini alarak
+    # calisiyor; denetim izi kalici bir birime tasindiginda, yalitim
+    # olmadan her test sahte olaylari botla AYNI dosyaya yazar -- ve
+    # zincir eklendiginde iki surec ayni zincire ayni anda ekleme yapar.
+    monkeypatch.setenv("VASI_LOG_FILE", str(tmp_path / "genel.log"))
+    monkeypatch.setenv("AUDIT_LOG_FILE", str(tmp_path / "denetim.log"))
+    monkeypatch.setenv("AUDIT_YEDEK_LOG_FILE", str(tmp_path / "denetim_yedek.log"))
+    # Ayni ilke ikinci tanik icin: testler gercek veritabanina baglanmaz.
+    # Parolaya ihtiyac duyan testler onu kendisi ayarliyor (test_memory).
+    monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
 
     repo_root = Path(__file__).resolve().parents[1]
     if str(repo_root) not in sys.path:

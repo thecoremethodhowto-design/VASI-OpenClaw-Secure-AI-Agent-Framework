@@ -104,7 +104,7 @@ def health() -> tuple[str, str]:
             with conn.cursor() as cur:
                 cur.execute("SELECT count(*) FROM sovereign_izleri")
                 (adet,) = cur.fetchone()
-        return "ok", f"{adet} denetim izi kayıtlı"
+        return "ok", f"{adet} parmak izi kayıtlı"
     except DbHatasi as e:
         return "error", str(e)
     except Exception as e:

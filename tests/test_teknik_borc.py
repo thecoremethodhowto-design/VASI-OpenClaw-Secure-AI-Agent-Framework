@@ -44,11 +44,23 @@ def test_basicconfig_duz_filehandler_kullanmiyor(vasi_module):
 # ── 2. Audit ayrimi ──────────────────────────────────────────────────────────
 
 def test_audit_ayri_dosyaya_yaziliyor(vasi_module):
-    """Denetim kayitlari gurultuden ayrilmali."""
-    kaynak = (Path(vasi_module.__file__)).read_text(encoding="utf-8")
-    assert "_audit_yazici = _doner_dosya(AUDIT_LOG_FILE)" in kaynak
-    assert "_audit_yazici.addFilter(_SadeceAudit())" in kaynak
-    assert "logger.addHandler(_audit_yazici)" in kaynak
+    """Denetim kayitlari gurultuden ayrilmali.
+
+    Bu testin onceki hali kaynak kodda bir satiri HARFI HARFINE
+    ariyordu ('_audit_yazici = _doner_dosya(AUDIT_LOG_FILE)'). Faz 3'te
+    o satirin yazilisi degisti, davranis degismedi -- ve test kirmizi
+    oldu. Metni olcen test, kodun ne yaptigini degil nasil yazildigini
+    olcer. Simdi gercekten yaziyor ve dosyaya bakiyor.
+    """
+    v = vasi_module
+    v.audit_event("ayrim_sinamasi", "123456", "x")
+    v.logger.info("siradan bir log satiri")
+
+    denetim = Path(v.AUDIT_LOG_FILE).read_text(encoding="utf-8")
+    assert "AUDIT | ayrim_sinamasi" in denetim
+    assert "siradan bir log satiri" not in denetim, (
+        "Genel log satiri denetim izine sizdi"
+    )
 
 
 def test_audit_filtresi_sadece_audit_geciriyor(vasi_module):
@@ -173,26 +185,54 @@ def test_tum_uretim_noktalari_korunuyor(vasi_module):
     Bir cagri noktasi atlanirsa, o komut hata metnini sessizce
     dosyaya yazar. LiteLLM fazinda benzer bir sey yasandi: dokuz
     komut model_for_role() yerine MODELS'i kullaniyordu.
+
+    TARAMA FONKSIYON BASINA YAPILIR. Bunun bir onceki hali dosyayi
+    bastan sona duz metin olarak tariyordu ve bekleyen bir model
+    cagrisini fonksiyon sinirinin otesine tasiyabiliyordu: cmd_kod_patch
+    (hic kaydetmeyen bir komut) ile cmd_hatirla (hic model cagirmayan
+    bir komut) eslesiyor, araya sikismis olu bir koruma satiri da
+    testi yesil tutuyordu. O satir NameError firlatiyordu ve /hatirla
+    calismiyordu -- test bunu gormedi, cunku kaynak metnini kontrol
+    ediyordu, davranisi degil.
     """
+    import ast
     import re
     from pathlib import Path
 
     kaynak = (Path(vasi_module.__file__)).read_text(encoding="utf-8")
     satirlar = kaynak.split("\n")
+    agac = ast.parse(kaynak)
+
+    URETIM = re.compile(
+        r"^(sonuc|arastirma) = "
+        r"(await run_model_with_tools\(|gemini_grounded_research\()"
+    )
 
     eksik = []
-    bekleyen = None
-    for i, satir in enumerate(satirlar):
-        sade = satir.strip()
-        if re.match(r"^(sonuc|arastirma) = (await run_model_with_tools\(|gemini_grounded_research\()", sade):
-            bekleyen = i
-        if bekleyen is not None and "preview, keyboard = set_pending(" in satir:
-            arada = "\n".join(satirlar[bekleyen:i])
-            if "model_ciktisi_kaydedilebilir(" not in arada:
-                eksik.append(f"satir {i + 1}")
-            bekleyen = None
+    kontrol_edilen = []
+    for dugum in ast.walk(agac):
+        if not isinstance(dugum, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        govde = satirlar[dugum.lineno - 1:dugum.end_lineno]   # yalniz bu fonksiyon
+        bekleyen = None
+        for i, satir in enumerate(govde):
+            if URETIM.match(satir.strip()):
+                bekleyen = i
+            if bekleyen is not None and "preview, keyboard = set_pending(" in satir:
+                arada = "\n".join(govde[bekleyen:i])
+                mutlak = dugum.lineno + i
+                kontrol_edilen.append(dugum.name)
+                if "model_ciktisi_kaydedilebilir(" not in arada:
+                    eksik.append(f"{dugum.name} (satir {mutlak})")
+                bekleyen = None
 
     assert not eksik, f"Su set_pending cagrilari korumasiz: {eksik}"
+    # Tarama kapsami daralirken sessizce hicbir seyi kontrol etmemeye
+    # dusmesin: bes gercek cift korunuyor.
+    assert len(kontrol_edilen) == 5, (
+        f"Beklenen 5 uretim-kaydetme cifti, bulunan {len(kontrol_edilen)}: "
+        f"{kontrol_edilen}"
+    )
 
 
 def test_basarisiz_uretim_kaydetme_sunmuyor(vasi_module):
@@ -200,3 +240,149 @@ def test_basarisiz_uretim_kaydetme_sunmuyor(vasi_module):
     kaynak = inspect.getsource(vasi_module._uretim_basarisiz)
     assert "kaydetme iptal" in kaynak
     assert "set_pending" not in kaynak
+
+# ── 5. /guvenlik raporunun iddialari koda uyuyor mu ──────────────────────────
+#
+# Rapor iki kisimdan olusuyor: kod sabitlerinden URETILEN satirlar ve
+# ELLE YAZILAN "Sıradaki İyileştirmeler" listesi. Elle yazilan kisim
+# kodla birlikte guncellenmezse rapor yanlis sey soyler -- ve bu rapor
+# izleyiciye gosteriliyor.
+#
+# Gercek olay: liste "rotasyon yok; dosya sinirsiz buyuyor" diyordu.
+# Kodda RotatingFileHandler vardi, 10 MB x 5 yedek. Iddia, anlattigi
+# kodun tersini soyluyordu ve hicbir test bunu gormedi.
+#
+# Sapma denetcisinin kendi dersi: bir iddia, dogrulanabilir degilse
+# iddia degildir.
+
+def test_guvenlik_raporu_rotasyon_iddiasi_koda_uyuyor(vasi_module):
+    """Kodda rotasyon varsa, rapor 'rotasyon yok' diyemez."""
+    kaynak = (Path(vasi_module.__file__)).read_text(encoding="utf-8")
+    rapor = vasi_module.build_security_report()
+
+    rotasyon_kodda = "RotatingFileHandler(" in kaynak
+    assert rotasyon_kodda, "bu test rotasyonun var oldugunu varsayiyor"
+
+    for yanlis in ("rotasyon yok", "sınırsız büyüyor", "sinirsiz buyuyor"):
+        assert yanlis not in rapor, (
+            f"Rapor '{yanlis}' diyor ama kodda RotatingFileHandler var. "
+            f"Elle yazilan liste koddan sapmis."
+        )
+
+
+def test_guvenlik_raporu_rotasyon_sayilari_sabitlerden_geliyor(vasi_module):
+    """Sayilar elle yazilirsa sabit degisince yalan olurlar."""
+    v = vasi_module
+    rapor = v.build_security_report()
+    mb = v.LOG_MAX_BYTES // (1024 * 1024)
+    assert f"{mb} MB × {v.LOG_BACKUP_COUNT} yedek" in rapor, (
+        "Rotasyon sayilari rapora sabitlerden girmiyor"
+    )
+
+
+def test_guvenlik_raporu_maskeleme_iddiasi_koda_uyuyor(vasi_module):
+    """Rapor maskeleme hakkinda ne diyorsa kod onu yapmali -- IKI YONDE.
+
+    Bu testin ilk hali tek yonluydu ve kodun maskesiz yazdigini
+    VARSAYIYORDU. Kod maskelemeye basladiginda sessizce yesil kalmadi:
+    "bu test audit_event'in maskesiz yazdigini varsayiyor" diyerek
+    dayandigi zeminin degistigini bildirdi. Iyi bir koruma testi
+    boyle davranir -- ama tek yonlu bir koruma, yarim bir korumadir.
+
+    Simdiki hali gercegi KAYNAK METNINDEN degil DAVRANISTAN turetiyor:
+    audit_event()'i gercekten cagirir, yazilan satira bakar, sonra
+    raporun ayni seyi soyleyip soylemedigini sinar. Kod hangi yone
+    giderse gitsin, rapor pesinden gitmek zorunda.
+    """
+    import logging
+    v = vasi_module
+
+    class _Topla(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.satirlar = []
+
+        def emit(self, kayit):
+            self.satirlar.append(kayit.getMessage())
+
+    topla = _Topla()
+    lg = logging.getLogger("vasi")
+    eski_seviye = lg.level
+    lg.setLevel(logging.INFO)
+    lg.addHandler(topla)
+    try:
+        v.audit_event("iddia_sinamasi", "987654321", "x")
+    finally:
+        lg.removeHandler(topla)
+        lg.setLevel(eski_seviye)
+
+    satir = next(s for s in topla.satirlar if "iddia_sinamasi" in s)
+    kod_maskeliyor = "987654321" not in satir and "***321" in satir
+
+    rapor = v.build_security_report()
+    rapor_maskeli_diyor = "kimliği her yerde maskelenir" in rapor
+    rapor_maskesiz_diyor = "log dosyasında değil" in rapor
+
+    if kod_maskeliyor:
+        assert rapor_maskeli_diyor and not rapor_maskesiz_diyor, (
+            "Kod kimligi maskeliyor ama rapor bunu soylemiyor ya da "
+            "tersini soyluyor."
+        )
+    else:
+        assert rapor_maskesiz_diyor and not rapor_maskeli_diyor, (
+            "Kod kimligi maskesiz yaziyor ama rapor maskeleme iddia ediyor."
+        )
+
+    # Ilk videodaki kosulsuz iddia bir daha geri gelmesin.
+    assert "Hassas içerik maskeleyen `AUDIT` satırları tutulur." not in rapor
+
+
+def test_guvenlik_raporu_duzelen_maddeleri_listelemiyor(vasi_module):
+    """Duzeltilmis bir kusur 'siradaki iyilestirme' olarak kalmamali.
+
+    Ters yondeki sapma: kod duzelir, liste guncellenmez, rapor artik
+    var olmayan bir kusuru anlatir. Bu da yanlis bir rapordur.
+    """
+    rapor = vasi_module.build_security_report()
+    liste = rapor[rapor.index("## Gerçekçi Sıradaki İyileştirmeler"):]
+    for duzelen in (
+        "iki kez yazılıyor",
+        "kimliğini maskesiz yazıyor",
+        "doğrudan birim testi yok",
+        "ikinci tanığı yok",
+    ):
+        assert duzelen not in liste, (
+            f"Duzeltilmis kusur hala listede: '{duzelen}'"
+        )
+
+
+
+# ── 6. Telegram metinlerinde Markdown isareti ────────────────────────────────
+
+def test_telegram_metinlerinde_markdown_isareti_yok():
+    """Bot hicbir yerde parse_mode kullanmiyor; '_metin_' ham gorunur.
+
+    Sovereign'da parse_mode kaldirildi (alt cizgili kontrol adlari mesaji
+    gonderilemez yapiyordu). Ama italik isaretleri metinlerde kaldi ve
+    her ekran goruntusunde '_Kod, politika ve yapilandirma..._' diye,
+    alt cizgileriyle gorundu.
+    """
+    import ast
+    import re
+
+    kok = Path(__file__).resolve().parents[1]
+    italik = re.compile(r"(^|\s)_[^\s_][^_\n]*_(\s|$)")
+    ihlaller = []
+    for ad in ("vasi.py", "sovereign.py"):
+        agac = ast.parse((kok / ad).read_text(encoding="utf-8"))
+        for d in ast.walk(agac):
+            if isinstance(d, ast.JoinedStr):
+                metin = "".join(v.value if isinstance(v, ast.Constant) else "X"
+                                for v in d.values)
+            elif isinstance(d, ast.Constant) and isinstance(d.value, str):
+                metin = d.value
+            else:
+                continue
+            if italik.search(metin):
+                ihlaller.append(f"{ad}:{d.lineno}  {metin.strip()[:60]!r}")
+    assert not ihlaller, "Ham Markdown isareti:\n  " + "\n  ".join(ihlaller)

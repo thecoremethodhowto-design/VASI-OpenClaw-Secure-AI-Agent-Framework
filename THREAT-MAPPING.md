@@ -18,7 +18,7 @@ bağlar.
 | 2 | Solucanlar | Her bileşen izole, en az yetkiyle | Docker sertleştirme | ⚙️ |
 | 3 | Truva Atları | İzinlileri say, yasakları değil | `ALLOWED_TOOL_NAMES` | ✅ |
 | 4 | Fidye Yazılımları | Erişim yüzeyi en küçük olsun | `safe_path()`, uzantı sınırı | ✅ |
-| 5 | Botnetler | Dış temas doğrulansın, iz bıraksın | `is_safe_url()`, `audit_event()` | ◐ |
+| 5 | Botnetler | Dış temas doğrulansın, iz bıraksın | `is_safe_url()`, `audit_event()` | ✅ |
 | 6 | Tedarik Zinciri | İsimle değil, parmak iziyle sabitle | Digest pinning, hash locking | ⚙️ |
 | 7 | Sosyal Mühendislik | Kimlik çok katmanlı doğrulansın | `is_authorized()` | ✅ |
 | 8 | Zehirli Üçgen | Emin değilsen "hayır" | Veri sınıflandırma | ✅ |
@@ -27,6 +27,7 @@ bağlar.
 | 11 | Sessiz Komut Düşüşü | Tanınmayan komut modele gitmesin | Bilinmeyen komut yakalayıcı | ✅ |
 | 12 | Dolaylı Enjeksiyon | Belge içeriği dış dünyaya ulaşamasın | Araçsız erişim + yerel model | ✅ |
 | 13 | Sessiz Yapılandırma Sapması | Sistem, yaptığını söylediği şeyi hâlâ yapmalı | Sapma denetçisi + yetenek kapatma | ✅ |
+| 14 | İz Silme | Bir kanıtın tek tanığı olmasın | Özet zinciri + ikinci tanık + onay | ✅ |
 
 **Test durumu:** ✅ birim testi var · ◐ kısmen · ⚙️ yapılandırma (birim
 testi uygun değil) · ❌ test yok
@@ -45,6 +46,8 @@ context.py     Model neyi bilmeli?    (bağımsız)
 execution.py   Şimdi yap              (yalnızca access'e bağımlı)
 memory.py      Kalıcı hafıza          (bağımsız)
 rag.py         Belge arama            (access + memory)
+audit_chain.py Denetim izi zinciri    (hiçbir yerel modülü import etmez)
+audit_store.py İkinci tanık           (memory'ye bağlı)
 vasi.py        Telegram + orkestrasyon
 ```
 
@@ -57,6 +60,12 @@ modülü import etmez.** Denetlediği her sabit ona anlık görüntü sözlüğ�
 olarak parametreyle gider. Bozulan bir modül denetçiyi de susturamaz,
 ve denetim mantığı PostgreSQL olmadan test edilebilir. Kalıcılık ayrı
 bir dosyada (`sovereign_store.py`) durur; bir test bu sınırı zorlar.
+
+`audit_chain.py` aynı kuralı izler: denetim izini yazan ve doğrulayan kod
+hiçbir yerel modülü import etmez. **Doğrulayıcı, doğruladığı sisteme
+güvenmemeli** — konteyner olmadan, macOS'un sistem Python'uyla (3.9)
+bile çalışır. Veritabanını bilen tek dosya `audit_store.py`'dir; yazıcı
+tanığı dışarıdan alır.
 
 Model çağrıları LiteLLM proxy'si üzerinden geçer. Takma adlar verinin
 nereye gittiğini söyler ve bu kural test edilir:
@@ -184,8 +193,11 @@ sistem sessiz kalamaz.
   reddedilir
 - `access.py` → `is_safe_url()` — protokol ve allowlist kontrolü
 - `execution.py` → `skill_web_radar()` içinde `allow_redirects=False`
-- `vasi.py` → `audit_event()` — güvenlik olayları kaydı
-- `observability.py` → `mask_user_id()` — kayıtlarda kimlik maskeleme
+- `vasi.py` → `audit_event()` — güvenlik olayları kaydı (bütünlüğü için
+  bkz. Kontrol 14)
+- `observability.py` → `mask_user_id()` — denetim izinde kimlik maskeleme
+- `access.py` → `is_authorized()` — yetkisiz denemenin kimliği genel
+  kayda açık yazılır
 
 **Tasarım notu — yönlendirme:** Yönlendirmeler `requests`'in otomatik
 takibiyle **izlenmez.** Otomatik takipte yalnızca ilk URL doğrulanmış
@@ -196,16 +208,36 @@ Bu, `allow_redirects=True`'dan daha güvenlidir.
 **Tasarım notu — arama motorları:** Google/Bing gibi sorgu sayfaları
 reddedilir. Bot isteklerine JavaScript'e bağımlı boş bir kabuk
 dönerler; model bunu "araştırma yaptım" sanıp kaynaksız iddia
-üretebilir. Bu, sessiz başarısızlığın en tehlikeli türüdür. Ayrıca kayıtlarda
-kullanıcı kimliği tam tutulmuyor (son üç hane); korelasyon için yeterli,
-kaydın kendisini risk hâline getirecek kadar değil.
+üretebilir. Bu, sessiz başarısızlığın en tehlikeli türüdür.
 
-**Test:** ◐ Kısmi
+**Tasarım notu — kimin kimliği maskelenir:** Denetim izinde ve hız sınırı
+kayıtlarında kullanıcının kendi kimliği maskelenir (son üç hane):
+korelasyon için yeterli, kaydın kendisini risk hâline getirecek kadar
+değil. Yetkisiz bir erişim denemesinin kimliği ise botun genel kaydına
+**açık** yazılır: başkasının kimliğini maskelerseniz kimin denediğini
+bilemezsiniz. Bu belge bir süre "kayıtlarda kimlik maskeleniyor"
+diyordu; oysa aynı çağrı denetim dosyasına kimliği açık yazıyordu. Artık
+bir test hiçbir log satırının ham kimlik yazmadığını, bir diğeri izinli
+tek istisnanın gerçekten var olduğunu doğruluyor.
+
+**Tasarım notu — iz yazılıyor mu:** `audit_event()`'in uzun süre doğrudan
+bir testi yoktu; adının geçtiği testlerden dördü kaynak kodun metnine
+bakıyordu. Çağrılıp ne yazdığına bakılınca üç kusur çıktı: her satır iki
+kez yazılıyordu (iki yazıcının varsayılan yolu aynıydı), modül her
+yeniden yüklendiğinde bir yazıcı daha ekleniyordu, ve Python'un kayıt
+sistemine önceden başka bir parça dokunduysa iz **hiç** yazılmıyordu.
+
+**Test:** ✅
 - `test_security_core.py` → `test_is_safe_url_blocks_localhost` ✅
 - `test_security_core.py` → `test_is_safe_url_blocks_non_http` ✅
 - `test_security_core.py` → `test_web_allowlist_blocks_unknown_domain` ✅
 - `test_observability.py` → `test_audit_summary_masks_user_and_lists_recent_events` ✅
-- `audit_event()` fonksiyonunun **doğrudan testi yok** ⚠️
+- `test_denetim_izi.py` → `test_audit_event_dosyaya_satir_yaziyor` ✅
+- `test_denetim_izi.py` → `test_ayni_yol_verilirse_tek_yazar` ✅
+- `test_denetim_izi.py` → `test_modul_yeniden_yuklenince_yazici_birikmiyor` ✅
+- `test_denetim_izi.py` → `test_kok_logger_onceden_yapilandirilmissa_iz_yine_yaziliyor` ✅
+- `test_maskeleme_politikasi.py` → `test_hicbir_log_satiri_ham_kimlik_yazmiyor` ✅
+- `test_maskeleme_politikasi.py` → `test_yetkisiz_erisim_maskesiz_loglaniyor` ✅
 
 ---
 
@@ -649,7 +681,7 @@ alınamaz bir şey olabileceği anlamına gelir (sızan bir anahtar geri
 gelmez), `UYARI` zararı geri alınabilir, `BİLGİ` kayda değer ama
 zararsız.
 
-### On kontrol
+### On bir kontrol
 
 | Kontrol | Tür | Ne sorar |
 |---|---|---|
@@ -660,6 +692,7 @@ zararsız.
 | `hafiza_kaynak_filtresi` | det. | Prompta yalnızca `user` kaynaklı hatıralar mı giriyor? |
 | `rag_arac_yalitimi` | det. | Araçsız kod yoluna araç yürütme sızmış mı? |
 | `onay_kapilari` | det. | Kalıcı etkisi olan her komut onay istiyor mu? |
+| `iz_butunlugu` | det. | Denetim izi kalıcı mı, zinciri sağlam mı, iki tanık uyuşuyor mu? Hiçbir yeteneği kapatmaz (Kontrol 14) |
 | `rag_izni_tanimli` | det. | Her sınıfın `rag_allowed` alanı açıkça yazılmış mı? |
 | `zaman_sapmasi` | det. | Geçen denetimden bu yana ne değişti? |
 | `hata_orani` | **sez.** | Komut hata oranı olağandışı yüksek mi? |
@@ -780,11 +813,11 @@ indirir.
 
 **Uygulama**
 - `sovereign.py` → `Bulgu.durdurabilir` — üç koşullu durdurma kuralı
-- `sovereign.py` → `KONTROLLER` — on kontrolün kaydı
+- `sovereign.py` → `KONTROLLER` — on bir kontrolün kaydı
 - `sovereign.py` → `audit()` — bir kontrol patlarsa diğerleri devam eder
 - `sovereign.py` → `YetenekKapisi` — kapatma, geçersiz kılma, süre
 - `sovereign.py` → `parmak_izi()`, `IZLENEN_ALANLAR` — saf fonksiyon
-- `sovereign_store.py` → `son_iz()`, `kaydet()` — denetim izi (PostgreSQL)
+- `sovereign_store.py` → `son_iz()`, `kaydet()` — parmak izi kayıtları (PostgreSQL)
 - `vasi.py` → `guvenlik_anlik_goruntusu()` — denetlenen sabitlerin toplandığı yer
 - `vasi.py` → `yetenek_engeli()` — reddin gerekçesini taşıyan mesaj
 - `vasi.py` → `run_model_with_tools()` — ithal sınırındaki kapı
@@ -849,13 +882,205 @@ gösterip birincinin neden var olduğunu belgeliyor.
 
 ---
 
+## 14. İz Silme → Kanıtın İkinci Tanığı
+
+**İlke:** Bir kanıtın tek tanığı olmamalı. Ve hiçbir şeye bakmamış bir
+doğrulayıcı "tamam" dememeli.
+
+**Neden:** MITRE ATT&CK, iz silmeyi (T1070, Indicator Removal) şöyle
+tarif eder: saldırgan kanıtı topluca silmek yerine dikkat çekecek
+olanları **seçerek** silebilir ya da değiştirebilir; sistemin normal
+görünmesine yetecek kadarını yerinde bırakabilir.
+
+Bu projede 3 Ekim 2026'da tam olarak bu yaşandı. İz saat 22.18'de
+"zincir kırık" diyordu: dosyaya dışarıdan dokunulmuştu. Bot durduruldu,
+müdahaleden önce alınmış bir yedek geri kondu, bot yeniden başlatıldı.
+Bir dakika sonra iz "zincir sağlam (1 halka)" dedi. Müdahalenin kaydı da,
+iki dakika önceki bir denetimin kaydı da gitmişti. Veritabanındaki parmak
+izi sayacı ve Docker'ın günlüğü o denetimi hatırlıyordu; iz
+hatırlamıyordu.
+
+### Dört katman
+
+| Katman | Ne yapar | Tek başına neyi göremez |
+|---|---|---|
+| Kalıcılık | İz workspace dışında, kalıcı bir klasörde (`./denetim`). Kalıcılık varsayılmaz, ölçülür | — |
+| Özet zinciri | Her satır bir öncekinin SHA-256 özetini taşır. Bot çalışırken yapılan bir değişiklik, yazıcının bir sonraki satırında ele verilir | Bot dururken sondan koparılan ya da baştan hesaplanan satırlar |
+| İkinci tanık | Her halka PostgreSQL'de ayrıca saklanır; silinen satırın ne olduğu ve ne zaman yazıldığı söylenir | Dosyaya ve veritabanına birlikte yazabilen biri |
+| Onay | Bulgu silinmez; kimliğiyle onaylanır ve onay da zincire yazılır | — |
+
+**Tasarım notu — neden gizli anahtar yok:** Özetler anahtarsızdır;
+dosyayı değiştirebilen biri bütün özetleri de yeniden hesaplayabilir.
+Sabit bir gizli anahtar bunu çözmez: anahtar da aynı makinede durur,
+dosyayı değiştirebilen anahtarı da okuyabilir. Schneier ve Kelsey'in
+yöntemi (her satırda değişen, eskisi silinen anahtar) ele geçirilmeden
+önce yazılan satırları korur; sondan koparılanı görmek için ise yine
+makinenin dışında tutulan bir kayıt gerekir. Bu adım henüz yok: ikinci
+kopya ayrı bir bileşende, aynı makinedeki PostgreSQL'de tutulur.
+
+**Tasarım notu — raporla, durdurma:** Tanığa ulaşılamıyorsa bot durmaz;
+dosyaya yazmaya devam eder, sağlık raporunda uyarır ve konteyner
+günlüğüne bir kez yazar. Kırık bir iz de hiçbir yeteneği kapatmaz
+(Kontrol 13'ün üçüncü koşulu: kapatılacak bir yetenek yok). Botu
+durdurmak, kanıtın yazıcısını susturmak demektir — bir saldırganın tam
+da istediği şey.
+
+**Tasarım notu — tanık, dosyanın unuttuğunu hatırlatır:** Bot açılırken
+tanığın ucuna bakar. Dosya geride kalmışsa zincir tanığın kaldığı yerden
+sürdürülür; boşluk dosyanın kendisinde de görünür ve sistem bunu kendi
+adına ize yazar. Tanık kapalıyken yazılan halkalar bellekte bekler;
+tanık dönünce, en geç bot kapanırken, ona yazılır.
+
+**Tasarım notu — tanığın doğum kaydı:** Tanık ilk kez dolarken dosyaya
+bir satır düşer: tanık şu halkadan beri tutuyor. Bu kayıt tanığın içinde
+değil, dosyanın zincirinde durur. Tanık sonradan boş ya da başı eksik
+bulunursa bu bir alarmdır; alarmla birlikte yeni bir doğum kaydı yazılır
+ve sonraki açılışlar aynı sıfırlamayı tekrar bildirmez. Tablonun
+silinmesi böyle **algılanır**; önlenmez (bkz. Bilinen sınırlar).
+
+**Tasarım notu — dönen dosya:** Döndürülen her yeni dosya, bir öncekinin
+nerede bittiğini söyleyen bir satırla başlar. Başı eksik bir dosya ancak
+böyle bir satırla başlıyorsa "döndü" sayılır; aksi hâlde baştan silme
+sayılır. Klasöre boş dosyalar koymak bu yüzden silmeyi aklamaz.
+
+**Tasarım notu — dosyanın yerine yenisi konunca:** Metin düzenleyiciler
+kaydederken dosyayı yerinde değiştirmez, yerine yenisini koyar. Eski
+yazıcı eski dosyayı açık tutar ve hiçbir yerde görünmeyen bir dosyaya
+yazmaya devam ederdi. Yazıcı artık her satırdan önce dosyanın hâlâ aynı
+dosya olup olmadığına bakar (cihaz ve inode numarası); değiştiyse yeniden
+açar ve olayı ize yazar.
+
+**Tasarım notu — onay bir listeyi onaylar, aralığı değil:** Her bulgunun
+bir kimliği vardır: türünden, yerinden ve satırın kendisinden hesaplanır.
+`/iz_onayla` önce neyin onaylanacağını gösterir, sonra onay butonu ister;
+onay satırı kimlikleri tek tek taşır ve hem dosyaya hem tanığa yazılır.
+İlk sürüm bir sıra aralığını onaylıyordu: o aralıktaki eski bir satıra
+sonradan dokunulursa yeni bir alarm olarak değil, onaylı geçmişin parçası
+olarak görünüyordu. Yeşil "onarıldı" değil, "görüldü" demektir.
+
+**Tasarım notu — "bilmiyorum" diyebilen doğrulayıcı:** Doğrulayıcının
+ilk sürümü, doğrulanacak tek bir halka yokken "zincirde henüz halka yok"
+yazıp sıfır çıkış koduyla dönüyordu: testler yeni imajda koşmuş, bot eski
+imajla çalışıyordu. Artık hiçbir şey doğrulayamadığında ayrı bir kodla
+(3) döner ve bunu açıkça yazar. `test.sh` de testlerin koştuğu imaj ile
+çalışan botun imajı farklıysa uyarır.
+
+**Uygulama**
+- `audit_chain.py` → `ZincirliDosyaYazicisi` — sıra ve özet ekler, dosya
+  kimliğini denetler, tanığa yazar, kesintide bekletir
+- `audit_chain.py` → `dogrula()`, `dogrula_dosyalar()` — dosyanın kendi
+  doğrulayıcısı
+- `audit_chain.py` → `karsilastir()`, `iki_tanigi_karsilastir()` — iki
+  kopya halka halka
+- `audit_chain.py` → `bulgu_kimligi()` — onayın taşıdığı kimlik
+- `audit_chain.py` → `main()` — komut satırı doğrulayıcı (çıkış kodu
+  0 sağlam · 1 kırık · 2 dosya yok · 3 doğrulanacak halka yok)
+- `audit_store.py` → `VeritabaniTanigi`, `init_schema()` — ikinci tanık
+  ve yalnızca ekleme tetikleyicileri
+- `vasi.py` → `denetim_izi_durumu()` — kalıcılığın ölçümü
+- `vasi.py` → `build_denetim_izi_health()` — `/saglik` satırı
+- `vasi.py` → `cmd_iz_dogrula()`, `cmd_iz_onayla()`
+- `sovereign.py` → `kontrol_iz_butunlugu()` — on birinci kontrol;
+  deterministik, kritik olabilir, hiçbir yeteneği kapatmaz
+- `kanit.py` → denetim izinin korumalarını kodun bir kopyasında bozan
+  kanıtlayıcı
+
+**Test:** ✅
+
+| Dosya | Ne sınar |
+|---|---|
+| `test_audit_chain.py` | Zincir ve doğrulayıcı: çalışırken yapılan değişiklikler, rotasyon, "bilmiyorum" diyen doğrulayıcı |
+| `test_ikinci_tanik.py` | Tanık: 3 Ekim senaryosu, kesinti, karşılaştırma, `/iz_dogrula` |
+| `test_iz_onayi.py` | Onay, açılış kaydı, denetçinin izi denetlemesi |
+| `test_inceleme_aciklari.py` | Birinci bağımsız incelemenin bulduğu dört açık |
+| `test_inceleme_aciklari_2.py` | İkinci inceleme: düzeltmelerin kendisinde bulunanlar |
+| `test_audit_store_pg.py` | Gerçek PostgreSQL ile (`VASI_TEST_PG` verilirse) |
+| `test_kanit.py` | Kanıtlayıcının kendisi |
+
+Öne çıkanlar:
+- `test_3_ekim_bot_dururken_geri_konan_yedek_yakalaniyor`
+- `test_SINIR_bot_dururken_bastan_hesaplanan_zincir_dosyayi_kandirir` —
+  dosyanın tek başına göremediğini belgeler; **geçmek zorunda**
+- `test_hicbir_sey_dogrulamayan_dogrulayici_tamam_demiyor`
+- `test_onaydan_sonra_eski_satir_degisirse_yeniden_uyariyor`
+- `test_tanik_bot_dururken_silinirse_acilista_alarm`
+- `test_bos_sahte_donmus_dosyalar_bastan_silmeyi_aklamiyor`
+- `test_tanik_yalnizca_ekleme_kabul_ediyor` — gerçek PostgreSQL'de
+- `test_denetci_izi_denetliyor_ama_hicbir_seyi_kapatmiyor`
+- `test_depoda_gercek_bir_telegram_kimligi_yok`
+
+> **Kanıtlayıcı da kanıtlanmalı.** `kanit.py` denetim izinin korumalarını
+> kodun bir kopyasında tek tek bozar ve onu bekleyen testin kırmızıya döndüğüne
+> bakar. İlk çalıştırmada sonuç "36 bozma, 0 yakalandı" idi. Korumalar
+> sağlamdı; kör olan sonucu okuyan betikti: `pytest.ini` zaten sessiz
+> modu açıyordu, betik bir kez daha isteyince pytest son özet satırını
+> hiç yazmadı. Betik yine de "yakalandı" demedi, "kanıt yok" dedi. Artık
+> sonuç makine için yazılan JUnit XML raporundan okunur ve kanıt
+> sayılmayan her satırın altına nedeni yazılır. Bugünkü sonuç: 65 bozmanın
+> 65'i yakalandı; gerçek veritabanı isteyen 2 bozma ayrıca atlandı.
+
+> **İki bağımsız inceleme.** Kod, işi hiç görmemiş ayrı bir yapay zekâ
+> ajanına verildi: önce videoda anlatılan her saat ve sayı ekran görüntüleriyle
+> karşılaştırıldı, sonra kod kırılmaya çalışıldı. İlk inceleme dört açık
+> buldu: tablonun komple silinmesi ilk kurulum sanılıyordu, onay bir
+> aralığı onaylıyordu, dosyanın başından silme rotasyon sayılıyordu ve
+> tanık kapalıyken yazılanlar tanığa hiç gitmiyordu. Düzeltmeler ikinci
+> incelemede yine kırıldı, altı bulguyla; başlıcaları: boş dosyalar
+> rotasyon taklidi yapabiliyordu ve sıfırlanan tanık her açılışta yeni
+> bir alarm yazıyordu. Her biri önce
+> saldırı olarak teste yazıldı, kırmızısı görüldü, sonra düzeltildi.
+
+### Bilinen sınırlar
+
+1. **İki tanık da aynı makinede.** Tanığın silinmesi yakalanır; ama
+   dosyaya ve veritabanına birlikte yazabilen biri yakalanmaz. İkisini
+   birlikte yeniden yazabilir; daha ucuzu, ikisini birlikte eski bir
+   hâline döndürebilir (dosyayı tanık öncesine kesip tabloyu silmek "ilk
+   kurulum"dan ayırt edilemez) ya da ikisine birden sahte bir onay
+   ekleyebilir (onay anahtarsızdır). Çıta yükseldi; kapanmadı.
+2. **Tanık ancak gördüğüne tanıklık eder.** Tanık kapalıyken bot da
+   durdurulursa aradaki satırların tek tanığı dosyadır; bot dururken
+   silinirlerse iki kopya yine uyuşur.
+3. **Zincir, bir satırın yazıldıktan sonra değiştirilmediğini gösterir;
+   doğru yazıldığını değil.** Ele geçirilmiş bir bot, kusursuz
+   mühürlenmiş bir zincire yanlış bir satır da yazabilir.
+4. **Zincirden ve tanıktan önce yazılan satırları doğrulayan yok.**
+   Sistem bunu her doğrulamada söyler.
+5. **Yetkisiz erişim denemeleri** mühürlü ize değil, botun genel kaydına
+   yazılır.
+6. **Yalnızca ekleme kuralı kazalara karşıdır, tablonun sahibine değil.**
+   Bot veritabanına tablonun sahibi olarak bağlanır; `DROP TABLE` tabloyu
+   tetikleyicileriyle birlikte götürür, süper kullanıcı tetikleyicileri
+   devre dışı da bırakabilir. Silinme algılanır, önlenmez.
+7. **Dosya tek başına zincirin kenarından giden bütün bir birimi
+   göremez.** En eski dönmüş dosyanın tamamen silinmesini Mac'teki
+   doğrulayıcı göremez, tanık görür. En eski yedeği erken silmek ise bir
+   sonraki rotasyondan sonra meşru rotasyondan ayırt edilemez; tanık o
+   satırları yine de saklar.
+
+**Sıradaki adım:** tanığa yalnızca ekleme yetkisi olan ayrı bir
+veritabanı hesabı (PostgreSQL'de bir nesneyi silme hakkı sahibinde
+doğuştan vardır; ayrı bir hesap bu hakkı taşımaz) ve zincirin ucunu bu
+makinenin dışına bağlamak (MITRE ATT&CK M1029, Remote Data Storage).
+
+---
+
 ## Testleri Çalıştırma
 
 ```bash
-docker compose run --rm vasi-core python -m pytest
+./test.sh
 ```
 
-Beklenen: 454 test geçer.
+Beklenen: 649 test geçer, 8 test atlanır (gerçek veritabanı isteyenler;
+`VASI_TEST_PG` verilmezse).
+
+Denetim izinin korumalarının gerçekten bir şey koruduğunu sınamak için:
+
+```bash
+./kanit.sh
+```
+
+Beklenen son satır: `65 bozma · 65 tanesi yakalandı · 2 atlandı`.
 
 ---
 
@@ -864,18 +1089,21 @@ Beklenen: 454 test geçer.
 Bu belge, kontrollerin **iddia edildiği gibi çalıştığını** göstermeyi
 amaçlar. Aşağıdakiler bilinen boşluklardır:
 
-1. `audit_event()` — doğrudan birim testi yok (Kontrol 5)
-2. Çerçeveleme modelin davranışını etkiler ama garanti etmez;
+1. Çerçeveleme modelin davranışını etkiler ama garanti etmez;
    asıl koruma araç yokluğudur
-3. Hafıza türleri ayrıştırılmıyor; tüm kayıtlar `preference` olarak
+2. Hafıza türleri ayrıştırılmıyor; tüm kayıtlar `preference` olarak
    saklanıyor (şema `fact` ve `context` türlerini de tanımlıyor)
-4. Sapma denetçisi **çalışan sistemi** denetler, diskteki dosyayı
+3. Sapma denetçisi **çalışan sistemi** denetler, diskteki dosyayı
    değil. Politika konteyner imajına gömülü olduğu için bu ayrım
    normalde görünmez; `policies/` dışarıdan bağlanırsa ikisi
    ayrışabilir ve denetçi bunu içeriden göremez (Kontrol 13)
-5. Kırmızı takım değerlendirmesi yapılmadı — testler kontrollerin
-   yazıldığı gibi çalıştığını doğrular, kararlı bir saldırgana karşı
-   yeterli olduğunu değil
+4. Denetim izinin iki tanığı da aynı makinede; dosyaya ve veritabanına
+   birlikte yazabilen biri yakalanmaz (Kontrol 14)
+5. Kapsamlı bir kırmızı takım değerlendirmesi yapılmadı. Denetim izi iki
+   bağımsız yapay zekâ incelemesinden geçti ve ikisinde de açık bulundu
+   (Kontrol 14); bu bir sızma testinin yerini tutmaz. Testler
+   kontrollerin yazıldığı gibi çalıştığını doğrular, kararlı bir
+   saldırgana karşı yeterli olduğunu değil
 6. Tehdit modeli tek operatörlü kişisel sistemdir; çok kullanıcılı
    senaryolar kapsam dışıdır
 
@@ -891,6 +1119,9 @@ Bu eşleştirmenin dayandığı tehdit analizleri:
 
 Referans çerçeveler:
 - [MITRE ATT&CK](https://attack.mitre.org)
+  — [T1070, Indicator Removal](https://attack.mitre.org/techniques/T1070)
+  · [M1029, Remote Data Storage](https://attack.mitre.org/mitigations/M1029)
 - [MITRE ATLAS](https://atlas.mitre.org)
 - [OWASP Top 10 for LLM Applications](https://genai.owasp.org/llmrisk/llm01-prompt-injection/)
+- Schneier ve Kelsey, [Secure Audit Logs to Support Computer Forensics](https://www.schneier.com/academic/archives/1999/05/secure_audit_logs_to.html) (1999)
 - [NIST AI RMF](https://www.nist.gov/itl/ai-risk-management-framework)

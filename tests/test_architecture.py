@@ -36,7 +36,11 @@ def modul_importlari(dosya_adi: str) -> set[str]:
     return isimler
 
 
-YEREL_MODULLER = {"vasi", "access", "context", "execution", "decision", "memory", "observability"}
+# Elle tutulmaz: kok dizindeki her .py yereldir. Elle tutulan liste
+# rag, sovereign, sovereign_store ve audit_chain'i icermiyordu -- yani
+# access.py yarin rag'i import etse bu test gormezdi. conftest.py'deki
+# yorum ayni hatayi zaten anlatiyor.
+YEREL_MODULLER = {p.stem for p in Path(__file__).resolve().parents[1].glob("*.py")}
 
 
 # ── Bagimsizlik ──────────────────────────────────────────────────────────────

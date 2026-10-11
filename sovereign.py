@@ -571,6 +571,51 @@ def kontrol_hata_orani(g: dict) -> list[Bulgu]:
     )]
 
 
+def kontrol_iz_butunlugu(g: dict) -> list[Bulgu]:
+    """Denetim izinin kendisi: kalici mi, zinciri saglam mi, tanikla uyusuyor mu?
+
+    DETERMINISTIK: zincirin kirik olmasi bir olgudur, tahmin degil.
+    Ama HICBIR yetenegi kapatmaz (YETENEK_YOK). Kurcalanmis bir iz, botu
+    durdurmanin degil raporlamanin gerekcesi -- kullanicinin karari:
+    "Raporla, durdurma." Botu durdurmak, kanitin yazicisini da susturur.
+
+    Onaylanmis gecmis (/iz_onayla) bulgu sayilmaz: goruldu, incelendi.
+    Bu kontrol olcum YAPMAZ; olcumler anlik goruntuyle gelir.
+    """
+    iz = g.get("denetim_izi")
+    if not iz:
+        return []
+    if iz.get("hata"):
+        return [Bulgu("iz_butunlugu", DETERMINISTIK, UYARI, YETENEK_YOK,
+                      f"Denetim izinin durumu okunamadı: {iz['hata']}")]
+
+    bulgular = []
+    if iz.get("kalicilik") != "kalici":
+        bulgular.append(Bulgu(
+            "iz_kaliciligi", DETERMINISTIK, UYARI, YETENEK_YOK,
+            f"Denetim izi kalıcı değil: {iz.get('kalicilik_aciklama', 'bilinmiyor')}.",
+        ))
+    zincir = iz.get("zincir")
+    if zincir and not zincir["saglam"]:
+        bulgular.append(Bulgu(
+            "iz_butunlugu", DETERMINISTIK, KRITIK, YETENEK_YOK,
+            f"Denetim izi: {zincir['ozet']}. Ayrıntı: /iz_dogrula",
+        ))
+    elif zincir and not zincir["temiz"]:
+        bulgular.append(Bulgu(
+            "iz_butunlugu", DETERMINISTIK, UYARI, YETENEK_YOK,
+            f"Denetim izine dışarıdan dokunulmuş · {zincir['ozet']}. Ayrıntı: /iz_dogrula",
+        ))
+    tanik = iz.get("tanik")
+    if tanik and not tanik["tamam"]:
+        ozet = tanik["ozet"]
+        bulgular.append(Bulgu(
+            "iz_tanigi", DETERMINISTIK, KRITIK if tanik["kritik"] else UYARI, YETENEK_YOK,
+            f"{ozet[:1].upper()}{ozet[1:]}. Ayrıntı: /iz_dogrula",
+        ))
+    return bulgular
+
+
 # Kontrol sirasi = rapor sirasi. En kritikten baslar.
 KONTROLLER = (
     kontrol_politika_kod_uyumu,
@@ -580,6 +625,7 @@ KONTROLLER = (
     kontrol_hafiza_kaynak_filtresi,
     kontrol_rag_arac_yalitimi,
     kontrol_onay_kapilari,
+    kontrol_iz_butunlugu,
     kontrol_rag_izni_tanimli,
     kontrol_zaman_sapmasi,
     kontrol_hata_orani,
@@ -612,7 +658,7 @@ def format_report(sonuc: DenetimSonucu) -> str:
         return (
             f"🛡️ Denetim temiz\n\n"
             f"{sonuc.calisan_kontrol} kontrol çalıştı, sapma bulunamadı.\n\n"
-            "_Kod, politika ve yapılandırma birbiriyle uyumlu._"
+            "Kod, politika ve yapılandırma birbiriyle uyumlu."
         )
 
     satirlar = ["🛡️ Denetim sonucu\n"]

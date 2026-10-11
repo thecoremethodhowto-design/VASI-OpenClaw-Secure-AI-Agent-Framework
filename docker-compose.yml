@@ -108,12 +108,27 @@ services:
     env_file: .env
     volumes:
       - ./workspace:/app/workspace
+      # Denetim izi KALICI ve workspace DISINDA. Ajanin dosya araclari
+      # yalnizca /app/workspace'e yazabilir; buraya yazamaz. Kalemi
+      # denetlenenin eline vermiyoruz.
+      #
+      # Neden adlandirilmis birim degil de klasor: `docker compose down -v`
+      # adlandirilmis birimlerin HEPSINI siler -- postgres_data dahil.
+      # Iki tanik ayni komutla olmemeli.
+      - ./denetim:/app/denetim
     environment:
       # Varsayilan: Mac/host uzerinde zaten calisan Ollama'yi kullan.
       OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
       LITELLM_BASE_URL: ${LITELLM_BASE_URL:-http://litellm:4000}
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
-      VASI_LOG_FILE: /tmp/vasi_audit.log
+      # Iki log ayari BURADA, yan yana. Onceden biri burada, biri .env'de
+      # duruyordu ve birbirinden habersiz ayni yolu gosteriyorlardi: her
+      # denetim satiri iki kez yaziliyordu.
+      #
+      # Genel log gecici bellekte (tmpfs): islemsel, kaybi kabul edilir.
+      VASI_LOG_FILE: /tmp/vasi.log
+      # Denetim izi kalici birimde: yeniden baslatmadan sag cikar.
+      AUDIT_LOG_FILE: /app/denetim/denetim.log
       VASI_NOTES_FILE: notlar/NOTES.md
       VASI_CHANNEL_STYLE_FILE: skills/youtube_icerik.md
       VASI_CODE_STYLE_FILE: skills/kod_yardimcisi.md

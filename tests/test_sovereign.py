@@ -301,6 +301,7 @@ BEKLENEN_ALANLAR = {
     "politika_siniflari", "prompta_girebilen", "gecerli_kaynaklar",
     "onay_gereken_komutlar", "onay_isteyen_komutlar",
     "aracsiz_fonksiyon_kaynagi", "komut_sayisi", "hata_sayisi",
+    "denetim_izi",
 }
 
 
@@ -324,6 +325,9 @@ def test_canli_sistem_denetimden_temiz_geciyor(vasi_module):
     var, ya da denetcinin beklentisi eskimis. Ikisi de duzeltilmeli.
     """
     sov = vasi_module.sovereign
+    # Testlerin denetim izi bilerek gecici bir dizinde (conftest yalitimi).
+    # Kalicilik olcumu testin degil kurulumun ozelligi; burada sabitlenir.
+    vasi_module.dosya_sistemi_turu = lambda yol, baglamalar=None: "ext4"
     sonuc = sov.audit(vasi_module.guvenlik_anlik_goruntusu())
 
     # BILGI seviyesi haric. Zaman sapmasi kontrolu her kod

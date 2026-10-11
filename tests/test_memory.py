@@ -4,7 +4,10 @@ Bu testler PostgreSQL GEREKTIRMEZ. Baglanti kurulmadan dogrulanabilen
 seyleri dogrular: sabitler, sema kisitlari, ve en onemlisi --
 guvenilmeyen kaynakli hatiralarin prompta giremeyecegi kurali.
 """
+import asyncio
 import inspect
+from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -410,3 +413,104 @@ def test_hatira_okuma_hatasi_sistemi_durdurmuyor(vasi_module, monkeypatch):
 
     monkeypatch.setattr(vasi_module.memory, "prompt_memories", patlayan)
     assert vasi_module._aktif_hatiralar() == []
+
+# ── Davranis testleri: komutlar GERCEKTEN calisiyor mu ───────────────────────
+#
+# Yukaridaki /hatirla testlerinin hepsi inspect.getsource() ile kaynak
+# METNINI kontrol ediyor. Bu, "set_pending cagriliyor" ile "set_pending
+# calisiyor" arasindaki farki gormez.
+#
+# Gercek olay: cmd_hatirla icine, audit_event ile set_pending arasina,
+# o fonksiyonda hic tanimlanmayan bir degiskene (sonuc) dokunan uc olu
+# satir sikismisti. Komut her cagrisinda NameError firlatiyor, kullanici
+# hicbir sey gormuyordu. 454 test yesildi -- cunku hicbiri fonksiyonu
+# cagirmiyordu.
+#
+# Asagidaki testler fonksiyonu GERCEKTEN calistiriyor. Govdede
+# erisilemeyen bir isim kalirsa kirmizi oluyorlar.
+#
+# pytest-asyncio KULLANMIYORUZ: yeni bir test bagimliligi, Docker
+# imajini da degistirmek demek. asyncio.run() ayni isi goruyor.
+
+def _calistir(coro):
+    """Bir async komutu senkron testte calistirir."""
+    return asyncio.run(coro)
+
+
+class _SahteMesaj:
+    def __init__(self):
+        self.gonderilenler = []
+        self.date = datetime.now(timezone.utc)
+        self.forward_origin = None
+
+    async def reply_text(self, metin, **kwargs):
+        self.gonderilenler.append((metin, kwargs))
+        return None
+
+
+class _SahteGuncelleme:
+    def __init__(self, user_id="123456"):
+        self.message = _SahteMesaj()
+        self.effective_user = SimpleNamespace(id=user_id)
+        self.effective_chat = SimpleNamespace(id=user_id, type="private")
+
+
+class _SahteBaglam:
+    def __init__(self, args):
+        self.args = args
+        self.user_data = {}
+
+
+@pytest.fixture()
+def hafiza_acik(vasi_module, monkeypatch):
+    """Hafizayi acik gosterir -- veritabanina dokunmadan."""
+    monkeypatch.setattr(vasi_module.memory, "is_configured", lambda: True)
+    return vasi_module
+
+
+def test_hatirla_gercekten_calisiyor(hafiza_acik):
+    """Komut cagrilinca onay butonu uretmeli -- istisna firlatmadan."""
+    v = hafiza_acik
+    update, context = _SahteGuncelleme(), _SahteBaglam(["favori", "rengim", "turkuaz"])
+
+    _calistir(v.cmd_hatirla(update, context))
+
+    assert update.message.gonderilenler, "kullaniciya hicbir sey gonderilmedi"
+    metin, kwargs = update.message.gonderilenler[-1]
+    assert "turkuaz" in metin
+    assert kwargs.get("reply_markup") is not None, "onay butonu yok"
+
+
+def test_hatirla_bekleyen_islem_birakiyor(hafiza_acik):
+    """Onay mekanizmasina GERCEKTEN kayit dusmeli."""
+    v = hafiza_acik
+    update, context = _SahteGuncelleme(), _SahteBaglam(["bana", "Patron", "de"])
+
+    _calistir(v.cmd_hatirla(update, context))
+
+    bekleyen = context.user_data.get("pending_action")
+    assert bekleyen is not None, "pending_action olusmadi"
+    assert bekleyen["action"] == "remember"
+    assert bekleyen["content"] == "bana Patron de"
+
+
+def test_hatirla_bos_icerik_kullanim_gosteriyor(hafiza_acik):
+    v = hafiza_acik
+    update, context = _SahteGuncelleme(), _SahteBaglam([])
+
+    _calistir(v.cmd_hatirla(update, context))
+
+    metin, kwargs = update.message.gonderilenler[-1]
+    assert "Kullanım" in metin
+    assert kwargs.get("reply_markup") is None, "bos istek icin onay butonu cikmamali"
+    assert context.user_data.get("pending_action") is None
+
+
+def test_unut_gercekten_calisiyor(hafiza_acik):
+    """Ayni sinif hata /unut icinde de olabilir -- orayi da calistir."""
+    v = hafiza_acik
+    update, context = _SahteGuncelleme(), _SahteBaglam(["3"])
+
+    _calistir(v.cmd_unut(update, context))
+
+    assert update.message.gonderilenler, "kullaniciya hicbir sey gonderilmedi"

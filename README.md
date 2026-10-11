@@ -36,6 +36,7 @@ Bu depodaki her guvenlik kontrolu, belirli bir tehdit sinifinin analizinden cika
 - Belge arama (RAG): `/indeksle`, `/bul`, `/sor` -- yerel embedding, aracsiz cevaplama
 - Deterministik `/guvenlik` raporu
 - Sapma denetcisi: `/denetle` -- kod, politika ve yapilandirma uyumu; sapma bulunca ilgili yetenegi kapatir
+- Muhurlu denetim izi: her satir bir oncekinin ozetini tasir; ikinci tanik (PostgreSQL) silinen satirin ne oldugunu soyler -- `/iz_dogrula`, `/iz_onayla`
 - Gozlemlenebilirlik: `/saglik`, `/istatistik`, `/audit_ozet`
 - Gemini API ile kaynakli internet arastirmasi
 - Docker hardening: read-only filesystem, tmpfs, no-new-privileges, cap_drop
@@ -71,11 +72,19 @@ VASI'nin temel guvenlik prensibi: model onerir, kritik islemler kullanici onayi 
 - RAG yerel kalir: `/sor` yalnizca yerel modelle calisir; embedding yalnizca yerel host'ta yapilir.
 - Siniflandirmada en kisitlayici sinif kazanir: `projeler/.env` PROJECT degil SECRET'tir, indekslenmez.
 - Taninmayan komutlar modele dusmez; `/hatırla` gibi Turkce karakterli yazimlar yakalanir ve dogru komut onerilir.
-- Sapma denetcisi: `/denetle` on kontrolu calistirir. Deterministik ve kritik bir bulgu ilgili yetenegi kapatir; sezgisel bir bulgu yalnizca raporlar.
+- Sapma denetcisi: `/denetle` on bir kontrolu calistirir. Deterministik ve kritik bir bulgu ilgili yetenegi kapatir; sezgisel bir bulgu yalnizca raporlar.
 - Yetenek kapatma dar kapsamlidir: sapma hangi yetenegi etkiliyorsa yalnizca o kapanir (`rag`, `hafiza_prompt`, `araclar`).
 - Kapatma geri alinabilir ama SURELIDIR: `/gecersiz_kil` onay ister, denetim gunlugune yazilir ve varsayilan 30 dakika sonra kendiliginden kalkar.
 - `sovereign.py` hicbir yerel modulu import etmez; denetledigi sabitler ona parametre olarak gider. Bozulan bir modul denetciyi susturamaz.
+- Denetim izi kalicidir ve workspace disindadir (`./denetim`): ajanin dosya araclari oraya yazamaz. Kalicilik varsayilmaz, olculur; olculemezse `/saglik` uyarir.
+- Denetim izi zincirlidir: her satir bir oncekinin SHA-256 ozetini tasir. Bot calisirken yapilan bir degisiklik, ozetler bastan hesaplansa bile yazicinin bir sonraki satirinda ele verilir; dosyanin yerine yenisinin konmasi da.
+- Ikinci tanik: her halka PostgreSQL'de ayrica saklanir. Tablo guncellemeyi, silmeyi ve bosaltmayi tetikleyiciyle reddeder. Dosyadan silinen bir satirin ne oldugunu ve ne zaman yazildigini tanik soyler; tanigin kendisi silinirse dosyadaki dogum kaydi bunu alarm olarak ize yazar.
+- Bulgu silinmez, onaylanir: `/iz_onayla` once neyin onaylanacagini gosterir, bulgulari kimlikleriyle tek tek onaylar ve onayin kendisini de zincire yazar. Onaydan sonraki her mudahale, eski satirlara bile olsa, yeniden uyarir.
+- Iz kirildiginda bot DURMAZ: bulgu kritiktir ama hicbir yetenegi kapatmaz. Botu durdurmak, kanitin yazicisini da susturur.
+- Dogrulayici sisteme guvenmez: `audit_chain.py` hicbir yerel modulu import etmez ve konteyner olmadan calisir. Dogrulayacak halka bulamazsa "tamam" demez.
+- Kimlik maskeleme: denetim izinde kullanicinin kimligi maskelenir. Yetkisiz bir erisim denemesinin kimligi ise botun genel kaydina acik yazilir; kim denedigi bilinsin diye.
 - `.env` Git ve Docker build baglamindan dislanir.
+- Denetim izi (`denetim/`) Git'e girmez: bazi satirlari kullanici girdisinin ilk 120 karakterini tasir.
 
 VASI, DACE mimarisiyle dort katmana ayrilmistir: `decision.py` (ne
 yapilmali), `access.py` (izin var mi), `context.py` (model neyi
@@ -121,7 +130,8 @@ Kalici hafizaya yazmak icin acik komut ve onay gerekir:
 ```
 
 `POSTGRES_PASSWORD` bos birakilirsa hafiza kapali kalir ve sistem
-normal calismaya devam eder.
+normal calismaya devam eder. Denetim izinin ikinci tanigi da olmaz:
+iz yalnizca dosyaya yazilir ve `/saglik` bunu bilgi olarak gosterir.
 
 **Dis modeller asla otomatik secilmez.** Yalnizca acik kullanici
 komutuyla devreye girerler. Bu hem maliyeti hem veri cikisini kontrol
@@ -235,6 +245,8 @@ docker compose logs -f vasi-core
 /gecersiz_kil rag
 /siniflandir notlar/NOTES.md
 /saglik
+/iz_dogrula
+/iz_onayla
 /istatistik
 /audit_ozet
 /rapor konu
@@ -242,10 +254,45 @@ docker compose logs -f vasi-core
 
 ## Test
 
-Container ici testler:
+Testleri dogru ortamda calistiran betik:
 
 ```bash
-docker compose run --rm vasi-core python -m pytest
+./test.sh                                # konteynerde; imaji once tazeler
+./test.sh -q tests/test_audit_chain.py   # pytest'e dogrudan aktarilir
+YEREL=1 ./test.sh                        # konteyner yerine yerel Python (3.10+)
+```
+
+Yesil sonuc test edilen imaj hakkindadir, Telegram'da konusan bot hakkinda
+degil. `./test.sh` bu yuzden calisan bot eski imajla calisiyorsa uyarir.
+
+Gercek veritabani isteyen testler `VASI_TEST_PG` verilmezse atlanir. Bu
+degisken, adi `_test` ile biten AYRI bir veritabanini gostermelidir.
+
+Denetim izinin testlerinin gercekten bir sey korudugunu sinamak icin:
+
+```bash
+./kanit.sh                 # denetim izinin korumalarini kodun bir KOPYASINDA tek tek bozar
+./kanit.sh --sadece 7      # tek bir kanit
+```
+
+Her bozmada ilgili test kirmiziya donmeli. Depoya ve calisan bota dokunmaz.
+
+Denetim izini konteyner olmadan, kendi bilgisayarinizda dogrulamak icin
+(macOS'un sistem Python'i 3.9 yeter):
+
+```bash
+python3 audit_chain.py denetim/denetim.log
+```
+
+Cikis kodu: `0` zincir saglam · `1` kirik ya da dis mudahale · `2` dosya yok ·
+`3` dogrulanacak halka yok (hicbir sey dogrulanmadi; "tamam" da denemez).
+
+`commit_oncesi.sh`, commit oncesi depoya gidecek her dosyada (sahnelenmis
+hallerinde de) `.env`'deki gizli degerleri ve Telegram kimligini arar;
+degerleri ekrana yazmaz:
+
+```bash
+./commit_oncesi.sh
 ```
 
 Evaluation seti:
@@ -275,10 +322,12 @@ docker run --rm -v "$(pwd)":/work -w /work python:3.11-slim \
 5. `/ara_ozet <konu>` kaynakli kisa arastirma uretiyor mu?
 6. `/ara_senaryo <konu>` onayli senaryo dosyasi olusturuyor mu?
 7. `/kod_patch <istek>` dosya yazmadan patch taslagi uretiyor mu?
-8. `/denetle` temiz rapor donuyor mu? (10 kontrol)
+8. `/denetle` temiz rapor donuyor mu? (11 kontrol)
 9. `policies/data_classification.yaml` dosyasina kodda tanimsiz bir sinif ekleyip
    yeniden kurun: `/denetle` sapmayi bulmali ve `/bul` reddetmeli. Sinifi silip
    tekrar `/denetle` calistirin -- yetenek kendiliginden acilmali.
+10. `/saglik` raporundaki Denetim izi satiri `zincir saglam` ve (PostgreSQL aciksa) `tanik uyusuyor` diyor mu?
+11. Bilgisayarda `python3 audit_chain.py denetim/denetim.log` cikis kodu `0` mi?
 
 ## 3 Komutluk Demo (Durdur / Kaldir / Tekrar Kur)
 
@@ -288,7 +337,11 @@ docker compose down --rmi local --volumes --remove-orphans
 docker compose up -d --build
 ```
 
-Not: `down --volumes` compose volume verilerini de siler.
+Not: `down --volumes` compose volume verilerini de siler: PostgreSQL'deki
+kalici hafizayi ve denetim izinin ikinci tanigini. Denetim izi dosyasi
+`./denetim` klasorunde kalir; adlandirilmis birim degil klasor, bilerek:
+iki tanik ayni komutla olmesin. Bir sonraki acilista sistem tanigin
+sifirlandigini alarm olarak ize yazar; `/iz_onayla` ile onaylanir.
 
 ## Proje Yapisi
 
@@ -299,11 +352,18 @@ Not: `down --volumes` compose volume verilerini de siler.
 ├── memory.py                # kalici hafiza (PostgreSQL)
 ├── rag.py                   # belge arama (parcalama, embedding, arama)
 ├── sovereign.py             # sapma denetcisi (yerel import YOK)
-├── sovereign_store.py       # denetim izi (PostgreSQL)
+├── sovereign_store.py       # sapma denetcisinin parmak izleri (PostgreSQL)
+├── audit_chain.py           # denetim izi zinciri + bagimsiz dogrulayici (yerel import YOK)
+├── audit_store.py           # denetim izinin ikinci tanigi (PostgreSQL, yalnizca ekleme)
+├── kanit.py                 # korumalari bozup testlerin yakaladigini kanitlar
 ├── access.py                # DACE: izin var mi?
 ├── context.py               # DACE: model neyi bilmeli?
 ├── execution.py             # DACE: simdi yap
 ├── observability.py
+├── test.sh                  # testleri dogru ortamda calistirir
+├── kanit.sh                 # kanit.py'yi konteynerde calistirir
+├── commit_oncesi.sh         # commit oncesi gizli deger taramasi
+├── scripts/bes_kanit.sh    # Sovereign videosunun bes kaniti (yerini kanit.sh aldi)
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.in          # duzenlenebilir bagimlilik listesi
@@ -318,6 +378,7 @@ Not: `down --volumes` compose volume verilerini de siler.
 │   └── data_classification.yaml
 ├── evaluation/
 │   └── eval_runner.py
+├── denetim/                 # denetim izi; calisirken olusur, Git'e girmez
 ├── tests/
 │   ├── conftest.py
 │   ├── test_architecture.py     # DACE katman sinirlari
@@ -328,6 +389,17 @@ Not: `down --volumes` compose volume verilerini de siler.
 │   ├── test_unknown_command.py  # taninmayan komut yakalama
 │   ├── test_rag.py              # indeksleme, arama, enjeksiyon korumasi
 │   ├── test_sovereign.py        # sapma denetcisi, yetenek kapisi, parmak izi
+│   ├── test_denetim_izi.py      # audit_event() gercekte ne yaziyor
+│   ├── test_maskeleme_politikasi.py  # kimin kimligi maskelenir
+│   ├── test_mesaj_akisi.py      # duz mesaj uctan uca
+│   ├── test_audit_chain.py      # ozet zinciri ve dogrulayici
+│   ├── test_ikinci_tanik.py     # zincirin veritabanindaki kopyasi
+│   ├── test_iz_onayi.py         # onay, acilis kaydi, denetcinin izi denetlemesi
+│   ├── test_inceleme_aciklari.py    # bagimsiz incelemenin buldugu dort acik
+│   ├── test_inceleme_aciklari_2.py  # ikinci inceleme: duzeltmelerin aciklari
+│   ├── test_audit_store_pg.py   # gercek PostgreSQL ile (VASI_TEST_PG)
+│   ├── test_kanit.py            # kanitlayicinin kendi testleri
+│   ├── test_teknik_borc.py      # log rotasyonu, audit ayrimi, tek onay mekanizmasi
 │   ├── test_security_core.py
 │   ├── test_observability.py
 │   └── test_degisiklikler.py

@@ -52,6 +52,32 @@ USER_RATE_LIMITS = {}
 GEMINI_RATE_LIMITS = {}
 GEMINI_DAILY_COUNTERS = {}
 
+# ── KIMLIK MASKELEME ─────────────────────────────────────────────────────────
+#
+# KURAL: Yetkili kullanicinin kimligi her yerde maskelenir; yetkisiz
+# olaninki hicbir yerde.
+#
+# Bu sistem tek kullaniciya kilitli. Yetkilendirmeden SONRA yazilan
+# her log satirindaki kimlik zaten belli -- hicbir soruyu cevaplamiyor,
+# ama ekran goruntusune, video karesine ve depoya giriyor. Yetkisiz
+# erisim denemesinde ise kimlik tek onemli bilgi: kim denedi.
+#
+# NEDEN IKINCI BIR KOPYA: observability.mask_user_id() ayni isi
+# yapiyor, ama access.py katman kurali geregi hicbir yerel modulu
+# import edemez (test_architecture.py). Iki kopya ayrisirsa ayni kimlik
+# iki farkli bicimde yazilir ve izler eslestirilemez -- bu yuzden
+# test_maskeleme_politikasi.py ikisinin AYNI sonucu verdigini sinar.
+
+def maske_kimlik(user_id: object) -> str:
+    """observability.mask_user_id ile AYNI: her turu kabul eder."""
+    metin = "" if user_id is None else str(user_id)
+    if metin == "sistem":           # observability.SISTEM_KIMLIGI -- bir kimlik degil
+        return metin
+    if not metin:
+        return "***"
+    return f"***{metin[-3:]}" if len(metin) > 3 else "***"
+
+
 # ── RATE LIMIT & YETKILENDIRME ──────────────────────────────────────────
 
 def check_rate_limit(user_id: str) -> bool:
@@ -68,7 +94,7 @@ def check_rate_limit(user_id: str) -> bool:
     
     # Limit kontrolü
     if len(USER_RATE_LIMITS[user_id]) >= RATE_LIMIT_REQUESTS:
-        logger.warning(f"⚠️ Rate limit aşımı: {user_id}")
+        logger.warning(f"⚠️ Rate limit aşımı: {maske_kimlik(user_id)}")
         return False
     
     USER_RATE_LIMITS[user_id].append(now)
@@ -86,7 +112,7 @@ def check_gemini_rate_limit(user_id: str) -> bool:
     ]
 
     if len(GEMINI_RATE_LIMITS[user_id]) >= GEMINI_RATE_LIMIT_REQUESTS:
-        logger.warning(f"⚠️ Gemini rate limit aşımı: {user_id}")
+        logger.warning(f"⚠️ Gemini rate limit aşımı: {maske_kimlik(user_id)}")
         return False
 
     GEMINI_RATE_LIMITS[user_id].append(now)
@@ -103,7 +129,7 @@ def check_gemini_daily_limit(user_id: str) -> bool:
         record["count"] = 0
 
     if record["count"] >= GEMINI_DAILY_LIMIT_REQUESTS:
-        logger.warning(f"⚠️ Gemini günlük limit aşıldı: {user_id}")
+        logger.warning(f"⚠️ Gemini günlük limit aşıldı: {maske_kimlik(user_id)}")
         return False
 
     record["count"] += 1
@@ -112,18 +138,19 @@ def check_gemini_daily_limit(user_id: str) -> bool:
 def is_authorized(update: Update) -> bool:
     user_id = str(update.effective_user.id)
     if MY_TELEGRAM_ID and user_id != MY_TELEGRAM_ID:
+        # BILEREK MASKESIZ: burada kimlik baskasinin -- tek onemli bilgi bu.
         logger.warning(f"🚫 Yetkisiz erişim denemesi: {user_id}")
         return False
     if update.effective_chat.type != "private":
         logger.warning(f"🚫 Grup mesajı reddedildi: {update.effective_chat.id}")
         return False
     if update.message and update.message.forward_origin:
-        logger.warning(f"🚫 Yönlendirilen mesaj reddedildi: {user_id}")
+        logger.warning(f"🚫 Yönlendirilen mesaj reddedildi: {maske_kimlik(user_id)}")
         return False
     if update.message:
         age = (datetime.now(timezone.utc) - update.message.date).total_seconds()
         if age > 60:
-            logger.warning(f"🚫 Eski mesaj reddedildi (yaş: {age}s): {user_id}")
+            logger.warning(f"🚫 Eski mesaj reddedildi (yaş: {age}s): {maske_kimlik(user_id)}")
             return False
     return True
 

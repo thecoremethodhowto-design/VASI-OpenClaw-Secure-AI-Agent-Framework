@@ -37,6 +37,8 @@ varsayıma göre tasarlanmıştır.
 - Model yönlendirme: hangi verinin hangi sağlayıcıya gittiği
 - Hafıza bütünlüğü: bir hatıranın kaynağı ve prompta girip girmediği
 - Dolaylı enjeksiyon: indekslenmiş bir belgedeki gizli talimatın etkisi
+- Denetim izinin bütünlüğü: bir kaydın değiştirilmesi, silinmesi ya da
+  izin eski bir hâline döndürülmesi
 
 **Kapsam dışında:**
 - Çok kullanıcılı erişim kontrolü
@@ -52,7 +54,7 @@ varsayıma göre tasarlanmıştır.
 VASİ'nin temel prensibi: **model önerir, kritik işlemler kullanıcı onayı
 olmadan yapılmaz.**
 
-Bu prensip, tehdit sınıflarının analizinden çıkan on iki somut ilkeye
+Bu prensip, tehdit sınıflarının analizinden çıkan on üç somut ilkeye
 dayanır. İlk sekizi video serisindeki sekiz tehdit sınıfından gelir;
 kalanlar sistem büyüdükçe eklendi:
 
@@ -86,6 +88,10 @@ kalanlar sistem büyüdükçe eklendi:
     yalnızca raporlar. Kapatmanın geçersiz kılma yolu vardır, çünkü
     geçersiz kılınamayan bir kontrol tamamen sökülür — ama o geçersiz
     kılma onaylıdır, izlidir ve **sürelidir**.
+13. **Kanıtın ikinci tanığı** — Bir kanıtın tek tanığı olmaz. Denetim izi
+    zincirlenir ve ayrı bir tanıkta da tutulur; bir bulgu silinmez,
+    onaylanır. Hiçbir şeye bakmamış bir doğrulayıcı "tamam" demez,
+    "bilmiyorum" der.
 
 Her ilkenin koddaki tam karşılığı, ilgili testleri ve bilinen eksikleri
 için: **[THREAT-MAPPING.md](THREAT-MAPPING.md)**
@@ -97,8 +103,12 @@ için: **[THREAT-MAPPING.md](THREAT-MAPPING.md)**
 Güvenlik kontrolleri otomatik testlerle doğrulanır:
 
 ```bash
-docker compose run --rm vasi-core python -m pytest
+./test.sh
 ```
+
+Testlerin kendisi de sınanır: `./kanit.sh` denetim izinin korumalarını
+kodun bir kopyasında tek tek bozar ve onu bekleyen testin kırmızıya
+döndüğünü doğrular. Depoya ve çalışan bota dokunmaz.
 
 Sistemin kendi güvenlik durumunu raporlaması için Telegram üzerinden:
 
@@ -115,10 +125,29 @@ Kod ile politikanın hâlâ uyumlu olduğunu çalışırken sınamak için:
 /denetle
 ```
 
-On kontrol çalışır. Deterministik ve kritik bir bulgu ilgili yeteneği
+On bir kontrol çalışır. Deterministik ve kritik bir bulgu ilgili yeteneği
 kapatır — `/saglik` raporunda hangi yeteneğin kapalı olduğu görünür.
 Denetim başlangıçta da çalışır, ama taban çizgisi yalnızca `/denetle`
 ile ilerler: bir insan raporu görmeden yeni hâl "normal" sayılmaz.
+
+On birinci kontrol denetim izinin kendisine bakar: iz kalıcı mı, zincir
+sağlam mı, iki tanık uyuşuyor mu? Kırık bir iz kritik bir bulgudur ama
+**hiçbir yeteneği kapatmaz**: botu durdurmak, kanıtın yazıcısını da
+susturur. Raporlanır.
+
+Denetim izini veritabanındaki kopyasıyla halka halka karşılaştırmak
+için:
+
+```
+/iz_dogrula
+```
+
+Sistemden bağımsız doğrulama için (konteyner gerekmez; doğrulayıcı
+hiçbir yerel modülü import etmez):
+
+```bash
+python3 audit_chain.py denetim/denetim.log
+```
 
 ---
 
@@ -126,11 +155,30 @@ ile ilerler: bir insan raporu görmeden yeni hâl "normal" sayılmaz.
 
 Şeffaflık adına, bilinen boşluklar açıkça listelenir:
 
-- `audit_event()` fonksiyonunun doğrudan birim testi yoktur
-- Kırmızı takım (red team) değerlendirmesi yapılmamıştır; testler
-  kontrollerin yazıldığı gibi çalıştığını doğrular, kararlı bir
-  saldırgana karşı yeterli olduğunu değil
-- Log rotasyonu uygulanmamıştır
+- Kapsamlı bir kırmızı takım (red team) değerlendirmesi yapılmamıştır.
+  Denetim izi iki kez, işi görmemiş bağımsız bir yapay zekâ incelemesinden
+  geçti ve iki seferde de açık bulundu; bu, bir sızma testinin yerini
+  tutmaz. Testler kontrollerin yazıldığı gibi çalıştığını doğrular,
+  kararlı bir saldırgana karşı yeterli olduğunu değil
+- Denetim izinin iki tanığı da aynı makinededir. Dosyaya ve veritabanına
+  birlikte yazabilen biri yakalanmaz: ikisini birlikte yeniden yazabilir,
+  birlikte eski bir hâline döndürebilir ya da ikisine birden sahte bir
+  onay ekleyebilir
+- Tanık kapalıyken bot da durdurulursa, aradaki satırları tanık hiç
+  görmemiş olur; tanık ancak gördüğüne tanıklık eder
+- Zincir, bir satırın yazıldıktan sonra değiştirilmediğini gösterir;
+  doğru yazıldığını değil. Ele geçirilmiş bir bot, mühürlü zincire yanlış
+  bir satır da yazabilir
+- Zincirden ve tanıktan önce yazılan satırları doğrulayan yoktur; sistem
+  bunu her doğrulamada söyler
+- Yetkisiz erişim denemeleri mühürlü ize değil, botun genel kaydına
+  yazılır
+- Tanık tablosunun güncelleme, silme ve boşaltma yasağı kazalara
+  karşıdır, tablonun sahibine karşı değil: bot veritabanına tablonun
+  sahibi olarak bağlanır ve sahip tabloyu silebilir. Silinmesi algılanır
+  (dosyadaki doğum kaydı), önlenmez. Sıradaki adım: tanığa yalnızca
+  ekleme yetkisi olan ayrı bir hesap ve zincirin ucunu makinenin dışına
+  bağlamak
 - Hafıza türleri ayrıştırılmıyor; tüm kayıtlar `preference` olarak saklanıyor
 - RAG çerçevelemesi modelin davranışını etkiler ama garanti etmez;
   asıl koruma `/sor` kod yolunda araç yürütme bulunmamasıdır
@@ -184,3 +232,15 @@ Bu sistem, çalıştıran kişinin şu önlemleri almasını varsayar:
   süresiz geçersiz kılma, kontrolü silmekle aynı şeydir
 - `/gecersiz_kil` sonrası asıl sapma düzeltilmelidir; geçersiz kılma
   sapmayı ortadan kaldırmaz, yalnızca geçici olarak yok sayar
+- `denetim/` klasörü versiyon kontrolüne eklenmemeli ve paylaşılmadan
+  önce gözden geçirilmelidir: bazı denetim satırları kullanıcı girdisinin
+  ilk 120 karakterini taşır
+- `/iz_onayla` bulguları silmez, "görüldü" yapar. Onaydan önce
+  önizlemedeki her bulgu okunmalıdır; onay incelemenin yerine geçmez
+- `docker compose down --volumes` ikinci tanığı (PostgreSQL verisini) da
+  siler; bir sonraki açılışta sistem bunu alarm olarak ize yazar
+- `VASI_TEST_PG` ayrı bir test veritabanını göstermelidir; adı `_test`
+  ile bitmeyen bir veritabanında bu testler çalışmaz
+- Depo herkese açıksa her push'tan önce `./commit_oncesi.sh`
+  çalıştırılmalıdır: `.env`'deki gizli değerleri ve Telegram kimliğini
+  depoya gidecek her dosyada, sahnelenmiş hâlleri dahil arar
