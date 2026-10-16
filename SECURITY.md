@@ -160,10 +160,11 @@ python3 audit_chain.py denetim/denetim.log
   geçti ve iki seferde de açık bulundu; bu, bir sızma testinin yerini
   tutmaz. Testler kontrollerin yazıldığı gibi çalıştığını doğrular,
   kararlı bir saldırgana karşı yeterli olduğunu değil
-- Denetim izinin iki tanığı da aynı makinededir. Dosyaya ve veritabanına
-  birlikte yazabilen biri yakalanmaz: ikisini birlikte yeniden yazabilir,
-  birlikte eski bir hâline döndürebilir ya da ikisine birden sahte bir
-  onay ekleyebilir
+- Denetim izinin iki tanığı da aynı makinededir. Bot tanığı silemez
+  (ayrı, yalnızca ekleme yetkili hesap); ama makineye ve veritabanının
+  süper kullanıcısına erişen biri yakalanmaz: dosyayı ve tanığı birlikte
+  yeniden yazabilir, birlikte eski bir hâline döndürebilir ya da ikisine
+  birden sahte bir onay ekleyebilir
 - Tanık kapalıyken bot da durdurulursa, aradaki satırları tanık hiç
   görmemiş olur; tanık ancak gördüğüne tanıklık eder
 - Zincir, bir satırın yazıldıktan sonra değiştirilmediğini gösterir;
@@ -173,11 +174,11 @@ python3 audit_chain.py denetim/denetim.log
   bunu her doğrulamada söyler
 - Yetkisiz erişim denemeleri mühürlü ize değil, botun genel kaydına
   yazılır
-- Tanık tablosunun güncelleme, silme ve boşaltma yasağı kazalara
-  karşıdır, tablonun sahibine karşı değil: bot veritabanına tablonun
-  sahibi olarak bağlanır ve sahip tabloyu silebilir. Silinmesi algılanır
-  (dosyadaki doğum kaydı), önlenmez. Sıradaki adım: tanığa yalnızca
-  ekleme yetkisi olan ayrı bir hesap ve zincirin ucunu makinenin dışına
+- Tanık tablosunun sahibi giriş yapamayan ayrı bir hesap, botun yetkisi
+  yalnızca ekleme ve okuma (Ekim 2026). Süper kullanıcı için güncelleme,
+  silme ve boşaltma yasağı yine yalnızca kazalara karşıdır: süper kullanıcı
+  kuralı kapatabilir, tabloyu silebilir. Silinmesi algılanır (dosyadaki
+  doğum kaydı), önlenmez. Sıradaki adım: zincirin ucunu makinenin dışına
   bağlamak
 - Hafıza türleri ayrıştırılmıyor; tüm kayıtlar `preference` olarak saklanıyor
 - RAG çerçevelemesi modelin davranışını etkiler ama garanti etmez;
@@ -218,7 +219,11 @@ Bu sistem, çalıştıran kişinin şu önlemleri almasını varsayar:
 - Bağımlılıklar güncellenirken hash'ler yeniden üretilmelidir
 - `LITELLM_MASTER_KEY` rastgele üretilmelidir (`openssl rand -hex 32`)
 - `POSTGRES_PASSWORD` rastgele üretilmelidir (`openssl rand -hex 24`);
-  boş bırakılırsa kalıcı hafıza kapalı kalır
+  boş bırakılırsa kalıcı hafıza kapalı kalır. İki ayrı parola vardır:
+  `.env`'deki botun hesabının, `postgres.env`'deki süper kullanıcınınki.
+  Süper kullanıcı parolası `.env`'e yazılmamalıdır: `.env`'in tamamı botun
+  ortamına girer
+- `postgres.env` git'e ve imaja girmez; `commit_oncesi.sh` onu da tarar
 - `/indeksle` çalıştırmadan önce `policies/data_classification.yaml`
   gözden geçirilmelidir; indekslenen her dosya `/bul` ile aranabilir olur
 - LiteLLM ve PostgreSQL sürümleri yükseltilmeden önce güvenlik

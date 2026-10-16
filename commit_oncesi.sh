@@ -56,18 +56,22 @@ desenli_dosyalar() {         # $1: -F (sabit dize) ya da -E (ifade)
       git grep -l --cached "$1" -f "$desen"; } 2>/dev/null | sort -u
 }
 
-# ── 1) .env hic takibe girmemis ve yok sayiliyor olmali ─────────────────────
-if git ls-files --error-unmatch .env >/dev/null 2>&1; then
-    bildir ".env takibe alinmis (sahnelenmis ya da commit edilmis)."
-    echo "         Sahnelendiyse: git rm --cached .env"
-    echo "         Commit edildiyse: gecmisten silinmeli ve icindeki her anahtar yenilenmeli."
-elif [ ! -e .env ]; then
-    tamam ".env bu klasorde yok (takipte de degil)"
-elif ! git check-ignore -q .env; then
-    bildir ".env .gitignore'da yok; 'git add -A' onu da ekler."
-else
-    tamam ".env takipte degil ve yok sayiliyor"
-fi
+# ── 1) .env ve postgres.env hic takibe girmemis ve yok sayiliyor olmali ─────
+# postgres.env veritabaninin SUPER KULLANICI parolasini tasir (Ekim 2026'dan
+# beri .env'de degil: .env botun dosyasi, bot onu tamamen alir).
+for sirli in .env postgres.env; do
+    if git ls-files --error-unmatch "$sirli" >/dev/null 2>&1; then
+        bildir "$sirli takibe alinmis (sahnelenmis ya da commit edilmis)."
+        echo "         Sahnelendiyse: git rm --cached $sirli"
+        echo "         Commit edildiyse: gecmisten silinmeli ve icindeki her anahtar yenilenmeli."
+    elif [ ! -e "$sirli" ]; then
+        tamam "$sirli bu klasorde yok (takipte de degil)"
+    elif ! git check-ignore -q "$sirli"; then
+        bildir "$sirli .gitignore'da yok; 'git add -A' onu da ekler."
+    else
+        tamam "$sirli takipte degil ve yok sayiliyor"
+    fi
+done
 
 # ── 2) Depoya gidecek dosyalar ──────────────────────────────────────────────
 # Takipteki her dosya + yok sayilmayan yeni dosyalar: 'git add -A' tam
@@ -81,18 +85,19 @@ tamam "$adet dosya taranacak ($degisen tanesi yeni ya da degismis)"
 # ── 3) Asla depoya girmemesi gereken dosya adlari ───────────────────────────
 yasak="$( { tr '\000' '\n' < "$liste"; git diff --cached --name-only --diff-filter=d; } \
     | sort -u \
-    | grep -E '(^|/)denetim/|(^|/)cekim_|(^|/)eski_iz|\.log(\.[0-9]+)?$|\.pem$|\.key$|(^|/)id_(rsa|ed25519)|(^|/)\.env(\.|$)' \
+    | grep -E '(^|/)denetim/|(^|/)cekim_|(^|/)eski_iz|\.log(\.[0-9]+)?$|\.pem$|\.key$|(^|/)id_(rsa|ed25519)|(^|/)\.env(\.|$)|(^|/)postgres\.env$' \
     | grep -vE '(^|/)\.env\.example$' || true)"
 if [ -n "$yasak" ]; then
-    bildir "su dosyalar depoya girmemeli (log, denetim izi, cekim, anahtar, .env):"
+    bildir "su dosyalar depoya girmemeli (log, denetim izi, cekim, anahtar, .env, postgres.env):"
     printf '%s\n' "$yasak" | listele
 else
     tamam "log, denetim izi, cekim ya da anahtar dosyasi yok"
 fi
 
 # ── 4) .env'deki gizli degerler hicbir dosyada gecmemeli ────────────────────
-# Adinda TOKEN, KEY, PASSWORD ya da SECRET gecen her degisken (en az 8
-# karakter) ve MY_TELEGRAM_ID (en az 5 hane). YAYINDAKI .env.example'da
+# .env ve postgres.env'de adinda TOKEN, KEY, PASSWORD ya da SECRET gecen
+# her degisken (en az 8 karakter) ve MY_TELEGRAM_ID (en az 5 hane).
+# YAYINDAKI ornek dosyada (.env.example / postgres.env.example)
 # (son commit) aynen gecen bir deger ornek degerdir, sir sayilmaz; diskteki
 # .env.example'a sonradan yazilmis gercek bir deger ise taranir. Kimlik hic
 # ornek sayilmaz. Her deger sirayla
@@ -100,7 +105,10 @@ fi
 # bir sonraki yazilir; ekrana hic yazilmaz.
 taranan=""
 ornek=""
-if [ -f .env ]; then
+# $1: sirli dosya, $2: yayindaki ornegi. Adlar dosyayla birlikte yazilir.
+tara() {
+    local sirli="$1" ornek_dosya="$2" satir ad deger en_az bulunan
+    [ -f "$sirli" ] || return 0
     while IFS= read -r satir || [ -n "$satir" ]; do
         satir="${satir%$'\r'}"
         satir="$(kirp "$satir")"
@@ -122,24 +130,26 @@ if [ -f .env ]; then
         [ "${#deger}" -ge "$en_az" ] || continue
         printf '%s\n' "$deger" > "$desen"
         if [ "$ad" != MY_TELEGRAM_ID ] \
-            && git show HEAD:.env.example 2>/dev/null | grep -qF -f "$desen"; then
-            ornek="${ornek:+$ornek, }$ad"
+            && git show "HEAD:$ornek_dosya" 2>/dev/null | grep -qF -f "$desen"; then
+            ornek="${ornek:+$ornek, }$sirli:$ad"
             continue
         fi
-        taranan="${taranan:+$taranan, }$ad"
+        taranan="${taranan:+$taranan, }$sirli:$ad"
         bulunan="$(desenli_dosyalar -F)"
         if [ -n "$bulunan" ]; then
-            bildir "$ad degeri su dosyalarda geciyor (deger yazilmadi):"
+            bildir "$sirli icindeki $ad degeri su dosyalarda geciyor (deger yazilmadi):"
             printf '%s\n' "$bulunan" | listele
         fi
-    done < .env
+    done < "$sirli"
     : > "$desen"
-fi
+}
+tara .env .env.example
+tara postgres.env postgres.env.example
 
 if [ ! -f .env ]; then
     dikkat ".env yok: gizli deger taramasi yapilmadi."
 elif [ -z "$taranan" ]; then
-    dikkat ".env'de taranacak dolu bir gizli deger bulunamadi."
+    dikkat ".env ve postgres.env'de taranacak dolu bir gizli deger bulunamadi."
 else
     tamam "taranan degiskenler: $taranan"
 fi

@@ -78,7 +78,7 @@ VASI'nin temel guvenlik prensibi: model onerir, kritik islemler kullanici onayi 
 - `sovereign.py` hicbir yerel modulu import etmez; denetledigi sabitler ona parametre olarak gider. Bozulan bir modul denetciyi susturamaz.
 - Denetim izi kalicidir ve workspace disindadir (`./denetim`): ajanin dosya araclari oraya yazamaz. Kalicilik varsayilmaz, olculur; olculemezse `/saglik` uyarir.
 - Denetim izi zincirlidir: her satir bir oncekinin SHA-256 ozetini tasir. Bot calisirken yapilan bir degisiklik, ozetler bastan hesaplansa bile yazicinin bir sonraki satirinda ele verilir; dosyanin yerine yenisinin konmasi da.
-- Ikinci tanik: her halka PostgreSQL'de ayrica saklanir. Tablo guncellemeyi, silmeyi ve bosaltmayi tetikleyiciyle reddeder. Dosyadan silinen bir satirin ne oldugunu ve ne zaman yazildigini tanik soyler; tanigin kendisi silinirse dosyadaki dogum kaydi bunu alarm olarak ize yazar.
+- Ikinci tanik: her halka PostgreSQL'de ayrica saklanir. Tablo guncellemeyi, silmeyi ve bosaltmayi tetikleyiciyle reddeder. Bot tanikta yalnizca ekleme yetkili; tablonun ve kuralin sahibi giris yapamayan ayri bir hesap. Dosyadan silinen bir satirin ne oldugunu ve ne zaman yazildigini tanik soyler; tanigin kendisi silinirse dosyadaki dogum kaydi bunu alarm olarak ize yazar.
 - Bulgu silinmez, onaylanir: `/iz_onayla` once neyin onaylanacagini gosterir, bulgulari kimlikleriyle tek tek onaylar ve onayin kendisini de zincire yazar. Onaydan sonraki her mudahale, eski satirlara bile olsa, yeniden uyarir.
 - Iz kirildiginda bot DURMAZ: bulgu kritiktir ama hicbir yetenegi kapatmaz. Botu durdurmak, kanitin yazicisini da susturur.
 - Dogrulayici sisteme guvenmez: `audit_chain.py` hicbir yerel modulu import etmez ve konteyner olmadan calisir. Dogrulayacak halka bulamazsa "tamam" demez.
@@ -181,8 +181,33 @@ ollama pull bge-m3
 
 ```bash
 cp .env.example .env
-chmod 600 .env
+cp postgres.env.example postgres.env
+chmod 600 .env postgres.env
 ```
+
+Iki dosya, iki hesap. `.env` botun dosyasidir; orada botun KENDI
+veritabani hesabi durur (`POSTGRES_USER=vasi_bot`). Veritabaninin super
+kullanici parolasi yalnizca `postgres.env`'de durur ve bota hic
+verilmez. Iki parolayi ayri uret (`openssl rand -hex 24`); ayni olurlarsa
+kurulum durur: bot o parolayla super kullanici olarak da baglanabilirdi.
+
+Bot, denetim izinin ikinci taniginda yalnizca satir ekleyip okuyabilir;
+tabloyu silemez, kurali kapatamaz. Hesaplari ilk kurulumda veritabani
+kendisi kurar (`scripts/postgres/kurulum.sh`). Bundan onceki bir surumden
+geciyorsan (bot super kullanici olarak baglaniyorsa) bir kez elle:
+
+```bash
+docker compose exec postgres sh /docker-entrypoint-initdb.d/10-vasi-tanik.sh
+```
+
+`/saglik` botun yetkisini olcer: kurulum yapilmamissa Denetim izi satiri
+"bot süper kullanıcı: tanığı silebilir" diye uyarir. Botun tablolari kendi
+semasindadir (adi hesabin adi); `public`te nesne kuramaz.
+
+Ilk kurulumda betik basarisiz olursa (orn. iki parola ayni) veritabani
+hesapsiz ayaga kalkar ve bot baglanamaz: hatayi duzeltip yukaridaki komutu
+elle calistir. `.env`'de `POSTGRES_PASSWORD` bossa betik atlanir (hafiza
+kapali).
 
 `.env` ornegi:
 
@@ -368,7 +393,9 @@ sifirlandigini alarm olarak ize yazar; `/iz_onayla` ile onaylanir.
 ├── docker-compose.yml
 ├── requirements.in          # duzenlenebilir bagimlilik listesi
 ├── requirements.txt         # hash kilitli, uretilmis dosya
-├── .env.example
+├── .env.example             # botun ortami (botun veritabani hesabi)
+├── postgres.env.example     # veritabaninin super kullanicisi (bota verilmez)
+├── scripts/postgres/        # ikinci tanigin hesap ve tablo kurulumu
 ├── pytest.ini
 ├── THREAT-MAPPING.md        # tehdit → kontrol eslesmesi
 ├── SECURITY.md              # guvenlik politikasi

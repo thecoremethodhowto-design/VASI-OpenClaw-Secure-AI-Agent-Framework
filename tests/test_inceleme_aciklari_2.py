@@ -212,9 +212,10 @@ def test_calisirken_silinen_tanik_hemen_bildiriliyor_ve_yeniden_doguyor(tmp_path
     yol, tanik = tmp_path / "iz.log", _SahteTanik()
     with _Yazici(yol, tanik) as y:
         y.yaz("bir")
-        tanik.sifirla()                              # bot calisirken DROP TABLE
-        y.yaz("iki")                                 # tablo yeniden kurulur: alarm HEMEN
+        tanik.sifirla()                              # bot calisirken DROP TABLE (super kullanici)
+        y.yaz("iki")                                 # tablo yok: alarm HEMEN, bot kurmaz
         calisirken = _satirlar(yol)                  # bot hala calisiyor
+        tanik.sema_kur()                             # yonetici: kurulum betigi
     assert any("tanık sıfırlanmış" in s for s in calisirken), calisirken[-3:]
     r = _dosya(yol)
     assert any("tanık sıfırlanmış" in m.aciklama for m in r.mudahaleler), r.mudahaleler

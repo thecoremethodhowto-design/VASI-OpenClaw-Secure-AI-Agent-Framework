@@ -48,7 +48,7 @@ IKINCI TANIK
     Bu modul tanigin NE oldugunu bilmez; yalnizca su uc metodu cagirir:
 
         son_halka()                -> (sira, ozet) ya da None
-        kaydet(sira, ozet, govde)  -> "yazildi" | "ayni" | "catal"
+        kaydet(sira, ozet, govde)  -> "yazildi" | "ayni" | "catal" | "tablo_yok"
         halkalar()                 -> [(sira, ozet, govde, zaman), ...]
 
     Tanik, yazicinin hafizasini yeniden baslatmadan sag cikarir: dosya
@@ -59,6 +59,9 @@ IKINCI TANIK
 
     Tanik da ayni makinede: dosyaya VE veritabanina birlikte yazabilen
     biri ikisini birlikte yeniden yazabilir. Cita yukselir, kapanmaz.
+    Ekim 2026'dan beri bot o kisi degil: tanikta yalnizca ekleme yetkisi
+    var (audit_store.yetki_durumu). Tablo yoksa tanik "tablo_yok" der ve
+    yazici onu yeniden kurdurmaz; halkalar tablo donene kadar bekler.
 
 ROTASYON
     Dosya sinira ulasinca doner; en eski yedek silinir. Silinen basi
@@ -108,6 +111,14 @@ IKINCI BAGIMSIZ INCELEME (5 Ekim 2026): duzeltmelerin kendisi kirildi
     anahtarsizdir: bu komut satiri (yalnizca dosyayi gorur) sahte bir onayi
     ayirt edemez, bot tanikla eder; ikisine birden yazabilen biri onay da
     uydurabilir.
+
+AYRI HESAP (Ekim 2026, "Gunlukler Yalan Soyleyebilir mi?" sonrasi)
+    Videodaki dort denemenin ikisi botun veritabani yetkisiyle yapildi:
+    tanik tablosunu dusurmek ve yalnizca-ekleme kuralini kapatip satir
+    silmek. Bot artik super kullanici degil; tanigin sahibi giris yapamayan
+    ayri bir hesap, botun yetkisi yalnizca ekleme ve okuma. Botu ele
+    geciren biri bu iki adimi atamaz. Makinenin ve veritabaninin super
+    kullanicisina erisen biri hala atabilir: bkz. test_SINIR_super_kullanici_...
 """
 from __future__ import annotations
 
@@ -167,6 +178,7 @@ _MUDAHALE = re.compile(
     r"AUDIT \| (?P<olay>" + MUDAHALE_OLAYI + "|" + TANIK_OLAYI + r") \| "
     r"user=[^|]* \| (?P<sebep>[^|]+?) \| sira=\d+$"
 )
+TABLO_YOK_SONUCU = "tablo_yok"   # tanik.kaydet(): tablo yok, yazilamadi (audit_store)
 _KUYRUK_SINIRI = 10000      # kesintide bellekte tutulacak en fazla halka
 
 _log = logging.getLogger("audit_chain")
@@ -386,20 +398,32 @@ class ZincirliDosyaYazicisi(RotatingFileHandler):
             self._tanik_erisilemedi(f"tanığa yazılamadı (sıra {sira})", e)
             self._kuyruga_ekle(sira, oz, govde)
             return
+        if sonuc == TABLO_YOK_SONUCU:
+            self._tablo_yok(sira)
+            self._kuyruga_ekle(sira, oz, govde)
+            return
         self._tanik_erisildi()
         self._kaydedildi(sira, sonuc)
 
-    def _kaydedildi(self, sira: int, sonuc: str):
-        # 'kuruldu' tanigin ILK halkasinda olagan (tablo ilk yazimda kurulur);
-        # tanik ondan once tutmaya basladiysa tablo silinmis demektir.
-        if sonuc == "kuruldu" and self._tanik_baslangici is not None \
-                and sira > self._tanik_baslangici and not self._sifirlama_bildirildi:
-            # Tablo yazarken yoktu: bot calisirken silinmis. Yeni tanigin
-            # ilk halkasi, az once yazilan bu halka.
+    def _tablo_yok(self, sira: int):
+        """Tanigin tablosu yok. Bot onu yeniden kurmaz (kuramaz): halkalar
+        bellekte bekler, tablo kurulum betigiyle donunce sirayla yazilir.
+
+        Tanik daha once tutulmaya baslamissa bu ilk kurulum DEGIL: tablo
+        silinmis. Bulgu bir kez yazilir; yeni tanigin ilk halkasi, bekleyen
+        ilk halka (sira) olur -- tablo dondugunde oradan dolar.
+        """
+        self._tanik_erisilemedi(
+            f"tanığa yazılamadı (sıra {sira})",
+            Exception("tanık tablosu yok; bot onu yeniden kuramaz, kurulum betiği gerekli"))
+        bas = self._tanik_baslangici
+        if bas is not None and sira > bas and not self._sifirlama_bildirildi:
             self._sifirlama_bildir(
-                f"tanık tablosu yoktu, yeniden kuruldu: sıra {self._tanik_baslangici}–{sira - 1} "
-                f"tanıkta yok; tanık sıfırlanmış", yeni_ilk=sira)
-        elif sonuc == "yazildi":
+                f"tanık tablosu yok: sıra {bas}–{sira - 1} tanıkta kayıtlıydı, tablo silinmiş; "
+                f"tanık sıfırlanmış", yeni_ilk=sira)
+
+    def _kaydedildi(self, sira: int, sonuc: str):
+        if sonuc == "yazildi":
             self._sifirlama_bildirildi = False      # bir sonraki silinme yine bildirilsin
         if sonuc == "catal":
             self.tanik_durumu = f"çatallanma: sıra {sira} tanıkta başka bir özetle kayıtlı"
@@ -420,6 +444,9 @@ class ZincirliDosyaYazicisi(RotatingFileHandler):
                 sonuc = self.tanik.kaydet(sira, oz, govde)
             except Exception as e:
                 self._tanik_erisilemedi(f"tanığa yazılamadı (sıra {sira})", e)
+                return False
+            if sonuc == TABLO_YOK_SONUCU:
+                self._tablo_yok(sira)
                 return False
             self._tanik_kuyrugu.pop(0)
             self._tanik_erisildi()

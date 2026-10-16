@@ -28,7 +28,7 @@ logger = logging.getLogger("vasi")
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "postgres")
 POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))
 POSTGRES_DB = os.getenv("POSTGRES_DB", "vasi")
-POSTGRES_USER = os.getenv("POSTGRES_USER", "vasi")
+POSTGRES_USER = os.getenv("POSTGRES_USER", "vasi_bot")   # botun hesabi; super kullanici degil
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")
 
 # Kac hatira sistem promptuna girer ve toplam karakter siniri.

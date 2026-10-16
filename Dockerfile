@@ -32,6 +32,10 @@ COPY audit_chain.py .
 COPY audit_store.py .
 COPY kanit.py .
 COPY litellm ./litellm
+# Testler icin: compose dosyasindaki sir ayrimi ve tanik kurulum betigi
+# testlerle sinaniyor (tests/test_tanik_hesabi.py). Ikisinde de sir yok.
+COPY docker-compose.yml .
+COPY scripts/postgres ./scripts/postgres
 
 # Security: Non-root user oluştur
 RUN useradd -m -u 1000 vasi && chown -R vasi:vasi /app

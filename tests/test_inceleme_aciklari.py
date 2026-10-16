@@ -78,16 +78,19 @@ def test_ilk_kurulumda_tanigin_dogumu_yaziliyor_alarm_yok(tmp_path):
 
 
 def test_ilk_kurulumda_tablo_yoksa_da_alarm_yok(tmp_path):
-    """Gercek veritabani testinin yakaladigi hata: veritabani acilista gec
-    kalirsa sema kurulamaz; tablo ilk YAZIMDA kurulur ('kuruldu'). Bu, ilk
-    kurulumda olagan -- 'tanık sıfırlanmış' alarmi yanlis olurdu."""
+    """Ilk kurulumda tablo henuz yok (kurulum betigi gec calisti): bu olagan,
+    'tanık sıfırlanmış' alarmi yanlis olurdu. Bot tabloyu kurmaz; halkalar
+    bekler ve tablo kurulunca tanigin ilk halkalari olur."""
     yol, tanik = tmp_path / "iz.log", _SahteTanik()
     tanik.tablo_yok = True
     with _Yazici(yol, tanik) as y:
-        y.yaz("bir", "iki")
+        y.yaz("bir")
+        assert not tanik.kayit, "bot tabloyu kurmamaliydi"
+        tanik.sema_kur()                             # yonetici: kurulum betigi
+        y.yaz("iki")
     r, k, _ = _iki(yol, tanik)
     assert r.temiz and not r.mudahaleler, r.mudahaleler
-    assert k.uyusuyor and k.eslesen == 3
+    assert k.uyusuyor and not k.taniksiz, k
 
 
 def test_tanik_sonradan_kurulursa_onceki_halkalar_alarm_degil(tmp_path):
@@ -142,15 +145,21 @@ def test_tanik_bot_dururken_silinirse_acilista_alarm(tmp_path):
 
 
 def test_tanik_bot_calisirken_silinirse_alarm(tmp_path):
+    """Bot tabloyu yeniden KURMAZ: alarm verir, halkalari bekletir; yonetici
+    kurunca bekleyenler sirayla yazilir."""
     yol, tanik = tmp_path / "iz.log", _SahteTanik()
     with _Yazici(yol, tanik) as y:
         y.yaz("bir", "iki")
-        tanik.sifirla()                              # bot calisirken DROP TABLE
-        y.yaz("uc", "dort")
+        tanik.sifirla()                              # bot calisirken DROP TABLE (super kullanici)
+        y.yaz("uc")
+        assert tanik.tablo_yok and not tanik.kayit, "bot tabloyu yeniden kurmamaliydi"
+        tanik.sema_kur()                             # yonetici: kurulum betigi
+        y.yaz("dort")
     r, k, _ = _iki(yol, tanik)
     assert [m.aciklama for m in r.mudahaleler] == [
-        "tanık tablosu yoktu, yeniden kuruldu: sıra 1–3 tanıkta yok; tanık sıfırlanmış"]
+        "tanık tablosu yok: sıra 1–3 tanıkta kayıtlıydı, tablo silinmiş; tanık sıfırlanmış"]
     assert k.sifirlanmis and k.taniksiz == [1, 2, 3]
+    assert not k.dosyada_yok and not k.farkli
 
 
 def test_tanigin_basi_silinirse_alarm(tmp_path):

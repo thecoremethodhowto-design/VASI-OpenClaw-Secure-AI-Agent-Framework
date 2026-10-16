@@ -587,13 +587,25 @@ def build_security_report() -> str:
     sovereign_state = YETENEK_KAPISI.durum_satiri()
     _iz_durum, _iz_detay = sovereign_store.health()
     iz_state = _iz_detay
+    # Hesap iddiasi da DAVRANISTAN: bot tanik uzerinde gercekte hangi yetkiyle bagli?
+    _yetki = tanik_yetkisi()
+    if _yetki is None:
+        tanik_hesap_cumlesi = "Tanığın hesap yetkisi ölçülemedi (PostgreSQL kapalı ya da tanık bağlı değil)."
+    elif _yetki[0] == audit_store.YALNIZCA_EKLEME:
+        tanik_hesap_cumlesi = (
+            "Bot tanıkta yalnızca ekleme ve okuma yetkili; tablonun ve kuralın sahibi giriş "
+            "yapamayan ayrı bir hesap: botu ele geçiren tanığı silemez, kuralı kapatamaz.")
+    else:
+        tanik_hesap_cumlesi = (
+            f"Tanığın yalnızca-ekleme kuralı bu kurulumda tabloyu korumuyor: {_yetki[1]}. "
+            "Kural sahibine işlemez; `scripts/postgres/kurulum.sh` çalıştırılmalı.")
     # Iddia DAVRANISTAN turer: yaziciya gercekten bir tanik bagli mi?
     if AUDIT_AYRI_DOSYADA and getattr(_audit_yazici, "tanik", None) is not None:
         _tanik_ozeti, _ = denetim_tanigi_ozeti(_zincir)
         tanik_state = (
             "Denetim izinin her halkası veritabanında da tutulur (`denetim_zinciri`, "
-            "yalnızca ekleme kabul eder: güncelleme, silme ve boşaltma reddedilir; bu kural "
-            "kazalara karşıdır, tablonun sahibine değil). Bot dururken dosyadan silinen ya "
+            "yalnızca ekleme kabul eder: güncelleme, silme ve boşaltma reddedilir). "
+            f"{tanik_hesap_cumlesi} Bot dururken dosyadan silinen ya "
             "da baştan hesaplanan halkalar `/iz_dogrula` ve `/saglik` ile yakalanır; yazıcı "
             "yeniden başlarken zinciri tanığın ucundan sürdürür. Tanığın doğum kaydı "
             "dosyadadır: tanık silinir ya da başı kesilirse bu ize alarm olarak yazılır. "
@@ -665,7 +677,7 @@ def build_security_report() -> str:
 - Gemini API key durumu: {"var" if bool(GEMINI_API_KEY) else "yok"}; model: `{GEMINI_MODEL}`.
 
 ## Gerçekçi Sıradaki İyileştirmeler
-1. İkinci tanık aynı makinede ve bot veritabanına tablonun sahibi olarak bağlanıyor: tanığın yalnızca-ekleme kuralı kazalara karşıdır; tablo tek komutla silinebilir. Silinirse ya da başı kesilirse bot bunu ize alarm olarak yazar ("tanık sıfırlanmış"). Ama dosyaya VE veritabanına birlikte yazabilen biri (sunucuya tam erişimi olan) yakalanmaz: ikisini birlikte yeniden yazabilir, birlikte eski bir hâline döndürebilir (dosyayı tanık öncesine kesip tabloyu silmek ilk kurulumdan ayırt edilemez) ya da ikisine birden bir onay satırı ekleyebilir (onay anahtarsızdır). Sıradaki adımlar: tanığa yalnızca ekleme yetkisi olan ayrı bir veritabanı hesabı ve zincirin ucunu düzenli aralıklarla makine dışına çapalamak (başka bir sunucu ya da imzalı zaman damgası). Tanık kapalıyken bot da durdurulursa o aradaki halkaların tek tanığı dosyadır. Tanık, kurulduğu andan önceki halkaları doğrulayamaz. Rotasyon ({LOG_MAX_BYTES // (1024*1024)} MB × {LOG_BACKUP_COUNT} yedek) en eski kayıtları siler; her yeni dosya bir dönme kaydıyla başlar ve baş eksikliği ancak böyle bir kayıtla başlıyorsa rotasyon sayılır. Bütün bir eski dosyanın silinmesini dosya tek başına göremez; tanık, kendi dönme kayıtlarını sayarak görür (en eski yedeğinkini bir sonraki rotasyona kadar: o dosya o rotasyonda zaten silinecekti). Mac'teki doğrulayıcının 0 çıkış kodu, onaylı geçmişin gerçek olduğunu kanıtlamaz; onayın sahtesini yalnızca tanık ayırt eder.
+1. İkinci tanık aynı makinede. {tanik_hesap_cumlesi} Silinirse ya da başı kesilirse bot bunu ize alarm olarak yazar ("tanık sıfırlanmış"). Ama makineye ve veritabanının süper kullanıcısına erişen biri yakalanmaz: dosyayı ve tanığı birlikte yeniden yazabilir, birlikte eski bir hâline döndürebilir (dosyayı tanık öncesine kesip tabloyu silmek ilk kurulumdan ayırt edilemez) ya da ikisine birden bir onay satırı ekleyebilir (onay anahtarsızdır). Sıradaki adım: zincirin ucunu düzenli aralıklarla makine dışına çapalamak (başka bir sunucu ya da imzalı zaman damgası). Tanık kapalıyken bot da durdurulursa o aradaki halkaların tek tanığı dosyadır. Tanık, kurulduğu andan önceki halkaları doğrulayamaz. Rotasyon ({LOG_MAX_BYTES // (1024*1024)} MB × {LOG_BACKUP_COUNT} yedek) en eski kayıtları siler; her yeni dosya bir dönme kaydıyla başlar ve baş eksikliği ancak böyle bir kayıtla başlıyorsa rotasyon sayılır. Bütün bir eski dosyanın silinmesini dosya tek başına göremez; tanık, kendi dönme kayıtlarını sayarak görür (en eski yedeğinkini bir sonraki rotasyona kadar: o dosya o rotasyonda zaten silinecekti). Mac'teki doğrulayıcının 0 çıkış kodu, onaylı geçmişin gerçek olduğunu kanıtlamaz; onayın sahtesini yalnızca tanık ayırt eder.
 2. Denetim izi iki kez bağımsız bir incelemeyle kırılmaya çalışıldı (4 ve 5 Ekim 2026); bulunanlar kapatıldı ya da yukarıda sınır olarak yazıldı. Sistemin geri kalanı için kırmızı takım değerlendirmesi yapılmadı: testler kontrollerin yazıldığı gibi çalıştığını doğrular, kararlı bir saldırgana karşı yeterli olduğunu değil.
 3. Hafıza türlerini ayrıştır: şema `fact` ve `context` türlerini tanımlıyor ama hepsi `preference` olarak yazılıyor.
 4. RAG benzerlik eşiği (`RAG_MIN_SCORE`) tek bir veri kümesine göre seçildi; içerik değişirse ayarlanmalı.
@@ -832,6 +844,30 @@ def denetim_tanigi_karsilastirmasi(dosya_raporu=None):
     return k, tanik_r, None, False
 
 
+def tanik_yetkisi():
+    """(durum, aciklama) -- botun tanik uzerindeki gercek yetkisi; olculemezse None.
+
+    Her cagrida veritabanina sorulur: biri hesabi sonradan super kullanici
+    yaptiysa bir sonraki /saglik bunu gormeli.
+    """
+    if not (AUDIT_AYRI_DOSYADA and memory.is_configured()):
+        return None
+    if getattr(_audit_yazici, "tanik", None) is None:
+        return None
+    try:
+        return audit_store.yetki_durumu()
+    except Exception as e:
+        return "okunamadi", f"tanığın yetkisi okunamadı: {' '.join(str(e).split())[:120]}"
+
+
+def _yetki_notu() -> str | None:
+    """Saglik/denetim satirina eklenecek not; yetki olmasi gerektigi gibiyse None."""
+    y = tanik_yetkisi()
+    if y is None or y[0] == audit_store.YALNIZCA_EKLEME:
+        return None
+    return y[1]
+
+
 def denetim_tanigi_ozeti(dosya_raporu=None) -> tuple[str, bool]:
     """(saglik satiri parcasi, tamam mi).
 
@@ -847,6 +883,12 @@ def denetim_tanigi_ozeti(dosya_raporu=None) -> tuple[str, bool]:
     yazici_notu = getattr(_audit_yazici, "tanik_durumu", None)
     if yazici_notu:
         satir += f" · {yazici_notu[:120]}"
+        tamam = False
+    yetki = tanik_yetkisi()
+    if yetki is not None and yetki[0] == audit_store.YALNIZCA_EKLEME:
+        satir += " · bot yalnızca ekleyebilir"
+    elif yetki is not None:
+        satir += f" · {yetki[1]}"
         tamam = False
     return satir, tamam
 
@@ -1788,12 +1830,14 @@ def _denetim_izi_alanlari() -> dict:
             t = None if yalnizca_bilgi else {"tamam": False, "kritik": False, "ozet": not_}
         else:
             yazici_notu = getattr(_audit_yazici, "tanik_durumu", None)
+            yetki_notu = _yetki_notu()
             ozet = audit_chain.tanik_ozet_satiri(k, tanik_r)
             t = {
-                "tamam": k.uyusuyor and tanik_r.saglam and not yazici_notu,
+                "tamam": k.uyusuyor and tanik_r.saglam and not yazici_notu and not yetki_notu,
                 "kritik": bool(k.dosyada_yok or k.farkli or k.sifirlanmis
                                or not tanik_r.saglam),
-                "ozet": ozet + (f" · {yazici_notu[:120]}" if yazici_notu else ""),
+                "ozet": ozet + (f" · {yazici_notu[:120]}" if yazici_notu else "")
+                             + (f" · {yetki_notu}" if yetki_notu else ""),
             }
         return {"denetim_izi": {
             "kalicilik": durum, "kalicilik_aciklama": aciklama, "zincir": z, "tanik": t,
@@ -2347,14 +2391,21 @@ if __name__ == "__main__":
                 sovereign_store.init_schema()
             except memory.MemoryError_ as e:
                 logger.warning(f"⚠️ Sovereign iz semasi kurulamadi: {e}")
+            # Tanigin semasini bot KURMAZ: kuran tablonun sahibi olur, sahip de
+            # tabloyu dusurebilir. Kurulum super kullanicinin isi
+            # (scripts/postgres/kurulum.sh). Bot yalnizca yetkisini olcer.
             try:
-                audit_store.init_schema()
+                _y_durum, _y_aciklama = audit_store.yetki_durumu()
+                if _y_durum == audit_store.YALNIZCA_EKLEME:
+                    logger.info(f"🔒 Denetim tanığı: {_y_aciklama}")
+                else:
+                    logger.warning(f"⚠️ Denetim tanığı: {_y_aciklama}")
             except Exception as e:
-                logger.warning(f"⚠️ Denetim tanigi semasi kurulamadi: {e}")
+                logger.warning(f"⚠️ Denetim tanığının yetkisi okunamadı: {e}")
         else:
             logger.info("💤 Hafiza kapali (POSTGRES_PASSWORD yok)")
 
-        # IKINCI TANIK. Sema hazir olduktan SONRA baglanir, cunku baglanirken
+        # IKINCI TANIK. Yetki olculdukten SONRA baglanir, cunku baglanirken
         # dosyanin ucu tanikla karsilastirilir: bot dururken dosyaya
         # dokunulduysa zincir TANIGIN ucundan surer ve bu ize yazilir.
         # Tanik okunamazsa bot durmaz; hizalama ilk yazimda yeniden denenir.

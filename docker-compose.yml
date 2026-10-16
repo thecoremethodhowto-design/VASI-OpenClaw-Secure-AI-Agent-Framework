@@ -49,10 +49,10 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
-      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-vasi}
-      POSTGRES_USER: ${POSTGRES_USER:-vasi}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      # POSTGRES_* YOK: LiteLLM veritabani kullanmiyor (config.yaml'da
+      # veritabani ayari yok). Onceden burada veritabaninin super kullanici
+      # parolasi duruyordu -- kullanilmayan bir sir, ele gecen bir
+      # konteynerde hazir bir anahtardi (Ekim 2026'da kaldirildi).
       MAX_HISTORY_TURNS: ${MAX_HISTORY_TURNS:-10}
     restart: unless-stopped
     networks:
@@ -83,21 +83,33 @@ services:
     # `docker compose exec postgres psql -U vasi` kullan.
     expose:
       - "5432"
+    # IKI HESAP, IKI DOSYA. Super kullanicinin parolasi YALNIZCA burada,
+    # postgres.env'de durur. .env botun dosyasidir (vasi-core onu tamamen
+    # alir): orada botun KENDI hesabi (POSTGRES_USER=vasi_bot) durur.
+    # Onceden super kullanici parolasi .env'deydi, yani botun icindeydi.
+    env_file: postgres.env
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-vasi}
-      POSTGRES_USER: ${POSTGRES_USER:-vasi}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Kurulum betigi botun hesabini bu parolayla kurar. Deger .env'deki
+      # POSTGRES_PASSWORD'dur (botun parolasi): tek yerde durur.
+      VASI_BOT_USER: ${POSTGRES_USER:-vasi_bot}
+      VASI_BOT_PASSWORD: ${POSTGRES_PASSWORD:-}
       # Alpine imaji icin: veri dizini
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Tanik hesaplari: bos birimde ilk kurulumda kendiliginden calisir;
+      # var olan kurulumda bir kez elle:
+      #   docker compose exec postgres sh /docker-entrypoint-initdb.d/10-vasi-tanik.sh
+      - ./scripts/postgres/kurulum.sh:/docker-entrypoint-initdb.d/10-vasi-tanik.sh:ro
+      - ./scripts/postgres/tanik.sql:/vasi-kurulum/tanik.sql:ro
     restart: unless-stopped
     networks:
       - vasi-network
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vasi} -d ${POSTGRES_DB:-vasi}"]
+      # $$: konteynerin KENDI ortamindan (postgres.env), .env'den degil.
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5

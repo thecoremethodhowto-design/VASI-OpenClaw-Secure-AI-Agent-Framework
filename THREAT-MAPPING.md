@@ -906,7 +906,7 @@ hatırlamıyordu.
 |---|---|---|
 | Kalıcılık | İz workspace dışında, kalıcı bir klasörde (`./denetim`). Kalıcılık varsayılmaz, ölçülür | — |
 | Özet zinciri | Her satır bir öncekinin SHA-256 özetini taşır. Bot çalışırken yapılan bir değişiklik, yazıcının bir sonraki satırında ele verilir | Bot dururken sondan koparılan ya da baştan hesaplanan satırlar |
-| İkinci tanık | Her halka PostgreSQL'de ayrıca saklanır; silinen satırın ne olduğu ve ne zaman yazıldığı söylenir | Dosyaya ve veritabanına birlikte yazabilen biri |
+| İkinci tanık | Her halka PostgreSQL'de ayrıca saklanır; silinen satırın ne olduğu ve ne zaman yazıldığı söylenir. Bot tanıkta yalnızca ekleyebilir | Makineye ve veritabanının süper kullanıcısına erişen biri |
 | Onay | Bulgu silinmez; kimliğiyle onaylanır ve onay da zincire yazılır | — |
 
 **Tasarım notu — neden gizli anahtar yok:** Özetler anahtarsızdır;
@@ -1016,8 +1016,9 @@ imajla çalışıyordu. Artık hiçbir şey doğrulayamadığında ayrı bir kod
 > modu açıyordu, betik bir kez daha isteyince pytest son özet satırını
 > hiç yazmadı. Betik yine de "yakalandı" demedi, "kanıt yok" dedi. Artık
 > sonuç makine için yazılan JUnit XML raporundan okunur ve kanıt
-> sayılmayan her satırın altına nedeni yazılır. Bugünkü sonuç: 65 bozmanın
-> 65'i yakalandı; gerçek veritabanı isteyen 2 bozma ayrıca atlandı.
+> sayılmayan her satırın altına nedeni yazılır. Bugünkü sonuç: 76 bozmanın
+> 76'sı yakalandı; gerçek veritabanı isteyen 10 bozma ayrıca atlandı
+> (gerçek veritabanıyla 86'nın 86'sı).
 
 > **İki bağımsız inceleme.** Kod, işi hiç görmemiş ayrı bir yapay zekâ
 > ajanına verildi: önce videoda anlatılan her saat ve sayı ekran görüntüleriyle
@@ -1048,20 +1049,44 @@ imajla çalışıyordu. Artık hiçbir şey doğrulayamadığında ayrı bir kod
    Sistem bunu her doğrulamada söyler.
 5. **Yetkisiz erişim denemeleri** mühürlü ize değil, botun genel kaydına
    yazılır.
-6. **Yalnızca ekleme kuralı kazalara karşıdır, tablonun sahibine değil.**
-   Bot veritabanına tablonun sahibi olarak bağlanır; `DROP TABLE` tabloyu
-   tetikleyicileriyle birlikte götürür, süper kullanıcı tetikleyicileri
-   devre dışı da bırakabilir. Silinme algılanır, önlenmez.
+6. **Yalnızca ekleme kuralı süper kullanıcıyı durdurmaz.** Ekim 2026'ya
+   kadar bot veritabanına tablonun sahibi (süper kullanıcı) olarak
+   bağlanıyordu; "Günlükler Yalan Söyleyebilir mi?" videosundaki iki
+   deneme (tabloyu düşürmek; kuralı kapatıp satır silmek) bununla
+   yapıldı. Artık bot ayrı bir hesapla bağlanır ve tanıkta yalnızca
+   ekleyip okuyabilir; tablonun ve kuralın sahibi giriş yapamayan başka
+   bir hesaptır (`scripts/postgres/tanik.sql`). Bot yetkisini her
+   `/saglik`'ta ölçer. Süper kullanıcı hâlâ her şeyi yapabilir
+   (`test_SINIR_super_kullanici_tanigi_hala_silebilir`); silinme
+   algılanır, önlenmez.
 7. **Dosya tek başına zincirin kenarından giden bütün bir birimi
    göremez.** En eski dönmüş dosyanın tamamen silinmesini Mac'teki
    doğrulayıcı göremez, tanık görür. En eski yedeği erken silmek ise bir
    sonraki rotasyondan sonra meşru rotasyondan ayırt edilemez; tanık o
    satırları yine de saklar.
 
-**Sıradaki adım:** tanığa yalnızca ekleme yetkisi olan ayrı bir
-veritabanı hesabı (PostgreSQL'de bir nesneyi silme hakkı sahibinde
-doğuştan vardır; ayrı bir hesap bu hakkı taşımaz) ve zincirin ucunu bu
-makinenin dışına bağlamak (MITRE ATT&CK M1029, Remote Data Storage).
+**Atılan adım (Ekim 2026):** tanığa yalnızca ekleme yetkisi olan ayrı
+bir veritabanı hesabı. PostgreSQL'de bir nesneyi silme hakkı sahibinde
+doğuştan vardır; bot artık sahip değil. Aynı incelemede LiteLLM'in
+kullanmadığı veritabanı parolasını aldığı görüldü ve kaldırıldı; süper
+kullanıcı parolası botun ortamından (`.env`) `postgres.env`'e taşındı.
+
+> **Değişikliğin kendisi de incelendi.** İşi görmemiş ayrı bir yapay zekâ
+> ajanı değişikliği gerçek bir PostgreSQL'e karşı kırmaya çalıştı ve ciddi
+> bir açık buldu: bot `public` şemasında `format()` ya da `pg_has_role()`
+> adlı kendi fonksiyonunu kurabiliyordu; kurulum betiği süper kullanıcı
+> olarak yeniden çalıştırılınca botunki çağrılıyor, bot kendini süper
+> kullanıcı yapıyordu (CVE-2018-1058 ile aynı sınıf). Kapatıldı: betik
+> yalnızca sistem kataloğundaki fonksiyonları kullanır, bot `public`'te
+> nesne kuramaz (tabloları kendi şemasına taşındı) ve `public`'te botun bir
+> nesnesi bulunursa kurulum durur. Aynı incelemede: dolaylı üyelikle
+> (bot → ara hesap → sahip) sahip olunabiliyordu ve ölçüm bunu görmüyordu;
+> bot kaydın zamanını kendisi yazabiliyordu; botun parolası süper
+> kullanıcınınkiyle aynıysa ayrı hesap hiçbir şey korumuyordu. Hepsi önce
+> teste yazıldı, sonra kapatıldı.
+
+**Sıradaki adım:** zincirin ucunu bu makinenin dışına bağlamak (MITRE
+ATT&CK M1029, Remote Data Storage).
 
 ---
 
@@ -1071,8 +1096,21 @@ makinenin dışına bağlamak (MITRE ATT&CK M1029, Remote Data Storage).
 ./test.sh
 ```
 
-Beklenen: 649 test geçer, 8 test atlanır (gerçek veritabanı isteyenler;
-`VASI_TEST_PG` verilmezse).
+Beklenen: 660 test geçer, 21 test atlanır: gerçek veritabanı isteyen 19
+(`VASI_TEST_PG` verilmezse) ve örnek dosyaları okuyan 2 (`.env.example`
+gibi dosyalar imaja kopyalanmaz; `YEREL=1 ./test.sh` ile çalışırlar).
+
+Gerçek veritabanı testleri konteynerde de çalışır. Postgres'te bir kez
+boş bir test veritabanı aç, sonra süper kullanıcıyla ver:
+
+```bash
+docker compose exec postgres createdb -U vasi vasi_test
+docker compose run --rm -e VASI_TEST_PG="host=postgres user=vasi password=... dbname=vasi_test" \
+    vasi-core python -m pytest tests/test_audit_store_pg.py
+```
+
+Testler `vasi_bot_test` ve `denetim_sahibi_test` adlı ayrı hesaplar kurar;
+gerçek bot hesabına dokunmaz.
 
 Denetim izinin korumalarının gerçekten bir şey koruduğunu sınamak için:
 
@@ -1080,7 +1118,8 @@ Denetim izinin korumalarının gerçekten bir şey koruduğunu sınamak için:
 ./kanit.sh
 ```
 
-Beklenen son satır: `65 bozma · 65 tanesi yakalandı · 2 atlandı`.
+Beklenen son satır: `76 bozma · 76 tanesi yakalandı · 10 atlandı`
+(gerçek veritabanıyla, `VASI_TEST_PG` verilince: `86 bozma · 86 tanesi yakalandı`).
 
 ---
 
@@ -1097,8 +1136,9 @@ amaçlar. Aşağıdakiler bilinen boşluklardır:
    değil. Politika konteyner imajına gömülü olduğu için bu ayrım
    normalde görünmez; `policies/` dışarıdan bağlanırsa ikisi
    ayrışabilir ve denetçi bunu içeriden göremez (Kontrol 13)
-4. Denetim izinin iki tanığı da aynı makinede; dosyaya ve veritabanına
-   birlikte yazabilen biri yakalanmaz (Kontrol 14)
+4. Denetim izinin iki tanığı da aynı makinede; bot tanığı silemez ama
+   makineye ve veritabanının süper kullanıcısına erişen biri yakalanmaz
+   (Kontrol 14)
 5. Kapsamlı bir kırmızı takım değerlendirmesi yapılmadı. Denetim izi iki
    bağımsız yapay zekâ incelemesinden geçti ve ikisinde de açık bulundu
    (Kontrol 14); bu bir sızma testinin yerini tutmaz. Testler

@@ -43,12 +43,13 @@ class _SahteTanik:
             raise ConnectionError("veritabanı kapalı")
 
     def sifirla(self):
-        """Saldirgan: docker compose exec postgres psql -c 'DROP TABLE denetim_zinciri'."""
+        """Saldirgan (super kullanici): docker compose exec postgres psql -c 'DROP TABLE ...'."""
         self.kayit.clear()
         self.tablo_yok = True
 
     def sema_kur(self):
-        """Bot acilisi: audit_store.init_schema() tabloyu BOS olarak yeniden kurar."""
+        """Yonetici: scripts/postgres/kurulum.sh tabloyu BOS olarak yeniden kurar.
+        Bot bunu YAPAMAZ (yalnizca ekleme yetkisi var)."""
         self.tablo_yok = False
 
     def son_halka(self):
@@ -66,12 +67,12 @@ class _SahteTanik:
 
     def kaydet(self, sira, ozet, govde):
         self._kontrol()
-        kuruldu = self.tablo_yok        # gercek tanik: tablo yoksa kurar ve yazar
-        self.tablo_yok = False
+        if self.tablo_yok:              # gercek tanik: tabloyu KURMAZ, yazamadigini soyler
+            return "tablo_yok"
         if sira in self.kayit:
             return "ayni" if self.kayit[sira] == (ozet, govde) else "catal"
         self.kayit[sira] = (ozet, govde)
-        return "kuruldu" if kuruldu else "yazildi"
+        return "yazildi"
 
     def halkalar(self):
         self._kontrol()
@@ -452,12 +453,23 @@ def test_iz_dogrula_komutu_kayitli_ve_yardimda(vasi_module):
     assert "/iz_dogrula" in vasi_module.HELP_TEXT
 
 
-def test_tanik_sema_kurulduktan_sonra_baglaniyor(vasi_module):
-    """Once sema, sonra baglama: baglanirken tanik okunur."""
+def test_bot_tanik_semasini_kurmuyor_yalnizca_yetkisini_olcuyor(vasi_module):
+    """Bot tanigin tablosunu KURMAZ: kuran tablonun sahibi olur, sahip de
+    tabloyu dusurebilir. Acilista yalnizca yetkisini olcer, sonra baglanir."""
     kaynak = Path(vasi_module.__file__).read_text(encoding="utf-8")
     ana = kaynak[kaynak.index('if __name__ == "__main__":'):]
-    assert "audit_store.init_schema()" in ana and "tanik_bagla(" in ana
-    assert ana.index("audit_store.init_schema()") < ana.index("tanik_bagla(")
+    assert "audit_store.init_schema" not in kaynak
+    assert "audit_store.yetki_durumu()" in ana and "tanik_bagla(" in ana
+    assert ana.index("audit_store.yetki_durumu()") < ana.index("tanik_bagla(")
+
+
+def test_audit_store_sema_tasimiyor():
+    """Sema kurulum betiginde, botun kodunda degil: bot DDL calistirmaz."""
+    import audit_store
+    kaynak = (KOK / "audit_store.py").read_text(encoding="utf-8")
+    assert not hasattr(audit_store, "init_schema") and not hasattr(audit_store, "SEMA")
+    for ddl in ("CREATE TABLE", "CREATE TRIGGER", "DROP ", "ALTER "):
+        assert ddl not in kaynak.split('"""', 2)[2], f"audit_store.py kodunda {ddl!r} var"
 
 
 def test_guvenlik_raporu_tanik_iddiasi_davranistan_geliyor(vasi_module):
@@ -488,14 +500,21 @@ def test_audit_store_yalnizca_hafiza_katmanina_dayaniyor():
 
 
 def test_tanik_semasi_yalnizca_ekleme_kabul_ediyor():
-    """Veritabani seviyesinde de: kodda degil yalnizca, semada.
+    """Veritabani seviyesinde de: kodda degil yalnizca, kurulum betiginde.
 
-    Davranisin kendisi (gercekten reddediliyor mu) gercek bir PostgreSQL
-    ister: test_audit_store_pg.py.
+    Davranisin kendisi (gercekten reddediliyor mu, bot gercekten silemiyor
+    mu) gercek bir PostgreSQL ister: test_audit_store_pg.py.
     """
-    import audit_store
-    sema = " ".join(audit_store.SEMA.split())
-    assert "BEFORE UPDATE OR DELETE ON denetim_zinciri" in sema
-    assert "BEFORE TRUNCATE ON denetim_zinciri" in sema
+    sema = " ".join((KOK / "scripts" / "postgres" / "tanik.sql").read_text(encoding="utf-8").split())
+    assert "BEFORE UPDATE OR DELETE ON public.denetim_zinciri" in sema
+    assert "BEFORE TRUNCATE ON public.denetim_zinciri" in sema
     assert "sira BIGINT PRIMARY KEY" in sema
     assert "CHECK (ozet ~ '^[0-9a-f]{32}$')" in sema
+    # Hesaplar: sahip giris yapamaz, bot yalnizca okur ve ekler.
+    assert "EXECUTE pg_catalog.format('ALTER TABLE public.denetim_zinciri OWNER TO %I', sahip)" in sema
+    assert "EXECUTE pg_catalog.format('ALTER ROLE %I NOLOGIN NOSUPERUSER" in sema
+    assert "EXECUTE pg_catalog.format('ALTER ROLE %I LOGIN NOSUPERUSER" in sema
+    assert "EXECUTE pg_catalog.format('GRANT SELECT ON public.denetim_zinciri TO %I', bot)" in sema
+    assert "'GRANT INSERT (sira, ozet, govde) ON public.denetim_zinciri TO %I', bot)" in sema
+    assert "REVOKE ALL ON public.denetim_zinciri FROM PUBLIC" in sema
+    assert "SET LOCAL search_path = pg_catalog, pg_temp;" in sema

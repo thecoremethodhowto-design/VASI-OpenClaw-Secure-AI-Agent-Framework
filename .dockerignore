@@ -1,4 +1,5 @@
 .env
+postgres.env
 .DS_Store
 .git
 .gitignore
