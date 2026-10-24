@@ -204,6 +204,39 @@ docker compose exec postgres sh /docker-entrypoint-initdb.d/10-vasi-tanik.sh
 "bot süper kullanıcı: tanığı silebilir" diye uyarir. Botun tablolari kendi
 semasindadir (adi hesabin adi); `public`te nesne kuramaz.
 
+### Makine disi capa
+
+Iki tanik da ayni makinede. Zincirin ucu bu yuzden saatte bir (yeni halka
+varsa), her `/iz_onayla`'da ve kapanista disaridaki bir zaman damgasi
+otoritesine imzalatilir (RFC 3161, varsayilan [freeTSA](https://freetsa.org/);
+ucretsiz, hesap gerekmez). Imzali makbuz `denetim/capa/` altinda durur ve bir
+kopyasi Telegram'dan sana gelir: makine silinse bile kopya telefonunda kalir.
+
+Makbuzlarin imzasini dogrulamak icin TSA sertifikasini bir kez depoya indir
+(parmak izini freetsa.org'daki degerle karsilastirir) ve commit'le:
+
+```bash
+sh scripts/capa/sertifika_indir.sh
+```
+
+Indirmezsen capa yine atilir ama `/saglik` "imza dogrulanmadi" der.
+Kapatmak icin `.env`'de `VASI_CAPA_TSA=` (bos). Bilgisayarinda, Telegram'dan
+indirdigin kopyalarla birlikte dogrulamak icin (`pip install cryptography`):
+
+```bash
+python3 capa.py denetim/denetim.log --capa denetim/capa --capa ~/Downloads/capa-kopyalar
+```
+
+Cikis kodu: `0` capalar ve zincir tutuyor · `1` capalanmis bir halka yeniden
+yazilmis ya da silinmis, zincirin sonu kesilmis, zincirin kendisi kirik ya da
+makbuz gecersiz · `2` okunamadi · `3` bulgu yok ama uyari var (orn. capali bir
+halka dosyalarda yok; rotasyon olabilir, kanitlanamaz).
+
+`--sertifika` icin bu makinedeki degil, GitHub'daki depodan (ya da kendi
+bilgisayarindaki kopyadan) sertifika klasorunu ver; ekrana yazilan parmak izini
+freetsa.org'dakiyle karsilastir. Telegram'daki makbuzlari indir ya da Kayitli
+Mesajlar'a ilet: bot kendi mesajini sonradan degistirebilir.
+
 Ilk kurulumda betik basarisiz olursa (orn. iki parola ayni) veritabani
 hesapsiz ayaga kalkar ve bot baglanamaz: hatayi duzeltip yukaridaki komutu
 elle calistir. `.env`'de `POSTGRES_PASSWORD` bossa betik atlanir (hafiza
@@ -352,6 +385,7 @@ docker run --rm -v "$(pwd)":/work -w /work python:3.11-slim \
    yeniden kurun: `/denetle` sapmayi bulmali ve `/bul` reddetmeli. Sinifi silip
    tekrar `/denetle` calistirin -- yetenek kendiliginden acilmali.
 10. `/saglik` raporundaki Denetim izi satiri `zincir saglam` ve (PostgreSQL aciksa) `tanik uyusuyor` diyor mu?
+    Capa satiri (acilistan bir dakika sonra) `capali: sira ≤ N` ve `imza dogrulandi` diyor mu, makbuz Telegram'a geldi mi?
 11. Bilgisayarda `python3 audit_chain.py denetim/denetim.log` cikis kodu `0` mi?
 
 ## 3 Komutluk Demo (Durdur / Kaldir / Tekrar Kur)
@@ -380,6 +414,7 @@ sifirlandigini alarm olarak ize yazar; `/iz_onayla` ile onaylanir.
 ├── sovereign_store.py       # sapma denetcisinin parmak izleri (PostgreSQL)
 ├── audit_chain.py           # denetim izi zinciri + bagimsiz dogrulayici (yerel import YOK)
 ├── audit_store.py           # denetim izinin ikinci tanigi (PostgreSQL, yalnizca ekleme)
+├── capa.py                  # zincirin ucunu makine disina capalar (RFC 3161) + dogrulayici
 ├── kanit.py                 # korumalari bozup testlerin yakaladigini kanitlar
 ├── access.py                # DACE: izin var mi?
 ├── context.py               # DACE: model neyi bilmeli?
@@ -396,6 +431,7 @@ sifirlandigini alarm olarak ize yazar; `/iz_onayla` ile onaylanir.
 ├── .env.example             # botun ortami (botun veritabani hesabi)
 ├── postgres.env.example     # veritabaninin super kullanicisi (bota verilmez)
 ├── scripts/postgres/        # ikinci tanigin hesap ve tablo kurulumu
+├── scripts/capa/            # TSA sertifikalari ve indirme betigi
 ├── pytest.ini
 ├── THREAT-MAPPING.md        # tehdit → kontrol eslesmesi
 ├── SECURITY.md              # guvenlik politikasi

@@ -87,6 +87,29 @@ yasak="$( { tr '\000' '\n' < "$liste"; git diff --cached --name-only --diff-filt
     | sort -u \
     | grep -E '(^|/)denetim/|(^|/)cekim_|(^|/)eski_iz|\.log(\.[0-9]+)?$|\.pem$|\.key$|(^|/)id_(rsa|ed25519)|(^|/)\.env(\.|$)|(^|/)postgres\.env$' \
     | grep -vE '(^|/)\.env\.example$' || true)"
+# .pem bir anahtar da olabilir, acik bir sertifika da. Yalnizca sertifika
+# iceren (ozel anahtar icermeyen) .pem dosyasi depoya girebilir: capanin TSA
+# sertifikasi (scripts/capa/freetsa/) ve testlerin sahte TSA'si boyle.
+acik_sertifika=""
+if [ -n "$yasak" ]; then
+    kalan=""
+    for f in $yasak; do
+        case "$f" in
+            *.pem)
+                if [ -f "$f" ] && grep -q -- '-----BEGIN CERTIFICATE-----' "$f" \
+                   && ! grep -q 'PRIVATE KEY' "$f"; then
+                    acik_sertifika="$acik_sertifika $f"
+                    continue
+                fi ;;
+        esac
+        kalan="$kalan
+$f"
+    done
+    yasak="$(printf '%s' "$kalan" | sed '/^$/d')"
+fi
+if [ -n "$acik_sertifika" ]; then
+    tamam "acik sertifika (ozel anahtar yok):$acik_sertifika"
+fi
 if [ -n "$yasak" ]; then
     bildir "su dosyalar depoya girmemeli (log, denetim izi, cekim, anahtar, .env, postgres.env):"
     printf '%s\n' "$yasak" | listele

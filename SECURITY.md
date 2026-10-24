@@ -156,7 +156,7 @@ python3 audit_chain.py denetim/denetim.log
 Şeffaflık adına, bilinen boşluklar açıkça listelenir:
 
 - Kapsamlı bir kırmızı takım (red team) değerlendirmesi yapılmamıştır.
-  Denetim izi üç kez, işi görmemiş bağımsız bir yapay zekâ incelemesinden
+  Denetim izi beş kez, işi görmemiş bağımsız bir yapay zekâ incelemesinden
   geçti ve her seferinde açık bulundu; bu, bir sızma testinin yerini
   tutmaz. Testler kontrollerin yazıldığı gibi çalıştığını doğrular,
   kararlı bir saldırgana karşı yeterli olduğunu değil
@@ -164,7 +164,22 @@ python3 audit_chain.py denetim/denetim.log
   (ayrı, yalnızca ekleme yetkili hesap); ama makineye ve veritabanının
   süper kullanıcısına erişen biri yakalanmaz: dosyayı ve tanığı birlikte
   yeniden yazabilir, birlikte eski bir hâline döndürebilir ya da ikisine
-  birden sahte bir onay ekleyebilir
+  birden sahte bir onay ekleyebilir. Ekim 2026'dan beri zincirin ucu
+  saatte bir ve her onayda makine dışına çapalanır (RFC 3161 zaman
+  damgası, `capa.py`): çapalanmış halkaların yeniden yazılması ve
+  zincirin sonunun kesilmesi yakalanır. Son çapadan sonra yazılan
+  halkalar korunmaz (pencere: en çok bir saat)
+- Makinedeki çapa makbuzları silinebilir; sahtesi üretilemez ama "hiç
+  yoktu" denebilir. Buna karşı duran, her makbuzun Telegram'dan sahibine
+  giden kopyasıdır: kopyalar `capa.py`'ye verilince silinen çapa yeniden
+  ortaya çıkar. Bot anahtarını ele geçiren biri botun gönderdiği mesajları
+  48 saat içinde silebilir (Telegram kuralı) ve kendi mesajını
+  düzenleyebilir ("düzenlendi" etiketi görünür); dosyayı telefona indirmek
+  ya da Kayıtlı Mesajlar'a iletmek bunu kapatır. Doğrularken TSA
+  sertifikasını makinedeki kopyadan değil GitHub'daki depodan ver
+- Çapanın güveni tek bir dış kuruma (varsayılan freeTSA) dayanır.
+  İmza, depodaki TSA sertifikasıyla doğrulanır; sertifika depoda yoksa
+  makbuz saklanır ama imzası "doğrulanmadı" olarak raporlanır
 - Tanık kapalıyken bot da durdurulursa, aradaki satırları tanık hiç
   görmemiş olur; tanık ancak gördüğüne tanıklık eder
 - Zincir, bir satırın yazıldıktan sonra değiştirilmediğini gösterir;
@@ -178,8 +193,8 @@ python3 audit_chain.py denetim/denetim.log
   yalnızca ekleme ve okuma (Ekim 2026). Süper kullanıcı için güncelleme,
   silme ve boşaltma yasağı yine yalnızca kazalara karşıdır: süper kullanıcı
   kuralı kapatabilir, tabloyu silebilir. Silinmesi algılanır (dosyadaki
-  doğum kaydı), önlenmez. Sıradaki adım: zincirin ucunu makinenin dışına
-  bağlamak
+  doğum kaydı), önlenmez. Zincirin ucu artık makinenin dışına
+  çapalanıyor (yukarıda)
 - Hafıza türleri ayrıştırılmıyor; tüm kayıtlar `preference` olarak saklanıyor
 - RAG çerçevelemesi modelin davranışını etkiler ama garanti etmez;
   asıl koruma `/sor` kod yolunda araç yürütme bulunmamasıdır

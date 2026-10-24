@@ -132,6 +132,8 @@ import sovereign
 import sovereign_store
 import audit_chain
 import audit_store
+import capa
+import threading
 
 # ── DECISION KATMANI (DACE) ───────────────────────────────────────────────────
 import decision
@@ -599,6 +601,24 @@ def build_security_report() -> str:
         tanik_hesap_cumlesi = (
             f"Tanığın yalnızca-ekleme kuralı bu kurulumda tabloyu korumuyor: {_yetki[1]}. "
             "Kural sahibine işlemez; `scripts/postgres/kurulum.sh` çalıştırılmalı.")
+    # Capa iddiasi da DAVRANISTAN: makbuzlar gercekten var ve zincirle uyusuyor mu?
+    if not CAPA_ACIK:
+        capa_cumlesi = ("Zincirin ucu makine dışına çapalanmıyor (`VASI_CAPA_TSA` boş): "
+                        "makineye ve veritabanının süper kullanıcısına erişen biri dosyayı ve "
+                        "tanığı birlikte yeniden yazabilir.")
+    else:
+        try:
+            _capa_r = capa_raporu()
+            _capa_durum = capa.ozet_satiri(_capa_r)
+        except Exception as e:
+            _capa_durum = f"okunamadı ({e.__class__.__name__})"
+        capa_cumlesi = (
+            f"Zincirin ucu her {CAPA_ARALIK_SN // 60} dakikada, her onayda ve kapanışta makine "
+            f"dışına çapalanır (RFC 3161 zaman damgası, `{CAPA_TSA}`; makbuzun kopyası "
+            f"Telegram'a gider): {_capa_durum}. Çapalanmış halkaları makineye erişen biri de "
+            f"fark edilmeden yeniden yazamaz; son çapadan sonra yazılanları yazabilir. "
+            f"Telegram'daki kopyaları bot kendi anahtarıyla düzenleyebilir ya da 48 saat "
+            f"içinde silebilir: makbuzları indir ya da Kayıtlı Mesajlar'a ilet.")
     # Iddia DAVRANISTAN turer: yaziciya gercekten bir tanik bagli mi?
     if AUDIT_AYRI_DOSYADA and getattr(_audit_yazici, "tanik", None) is not None:
         _tanik_ozeti, _ = denetim_tanigi_ozeti(_zincir)
@@ -677,8 +697,8 @@ def build_security_report() -> str:
 - Gemini API key durumu: {"var" if bool(GEMINI_API_KEY) else "yok"}; model: `{GEMINI_MODEL}`.
 
 ## Gerçekçi Sıradaki İyileştirmeler
-1. İkinci tanık aynı makinede. {tanik_hesap_cumlesi} Silinirse ya da başı kesilirse bot bunu ize alarm olarak yazar ("tanık sıfırlanmış"). Ama makineye ve veritabanının süper kullanıcısına erişen biri yakalanmaz: dosyayı ve tanığı birlikte yeniden yazabilir, birlikte eski bir hâline döndürebilir (dosyayı tanık öncesine kesip tabloyu silmek ilk kurulumdan ayırt edilemez) ya da ikisine birden bir onay satırı ekleyebilir (onay anahtarsızdır). Sıradaki adım: zincirin ucunu düzenli aralıklarla makine dışına çapalamak (başka bir sunucu ya da imzalı zaman damgası). Tanık kapalıyken bot da durdurulursa o aradaki halkaların tek tanığı dosyadır. Tanık, kurulduğu andan önceki halkaları doğrulayamaz. Rotasyon ({LOG_MAX_BYTES // (1024*1024)} MB × {LOG_BACKUP_COUNT} yedek) en eski kayıtları siler; her yeni dosya bir dönme kaydıyla başlar ve baş eksikliği ancak böyle bir kayıtla başlıyorsa rotasyon sayılır. Bütün bir eski dosyanın silinmesini dosya tek başına göremez; tanık, kendi dönme kayıtlarını sayarak görür (en eski yedeğinkini bir sonraki rotasyona kadar: o dosya o rotasyonda zaten silinecekti). Mac'teki doğrulayıcının 0 çıkış kodu, onaylı geçmişin gerçek olduğunu kanıtlamaz; onayın sahtesini yalnızca tanık ayırt eder.
-2. Denetim izi üç kez bağımsız bir incelemeyle kırılmaya çalışıldı (4 ve 5 Ekim 2026; ayrı tanık hesabı değişikliği de Ekim 2026'da); bulunanlar kapatıldı ya da yukarıda sınır olarak yazıldı. Sistemin geri kalanı için kırmızı takım değerlendirmesi yapılmadı: testler kontrollerin yazıldığı gibi çalıştığını doğrular, kararlı bir saldırgana karşı yeterli olduğunu değil.
+1. İkinci tanık aynı makinede. {tanik_hesap_cumlesi} Silinirse ya da başı kesilirse bot bunu ize alarm olarak yazar ("tanık sıfırlanmış"). {capa_cumlesi} Onay anahtarsızdır: çapadan sonra verilen bir onay yalnızca uyarı olarak sorulur. Çapa tek bir dış kuruma güvenir; sıradaki adım ikinci bir kurum ya da Bitcoin'e bağlı bir zaman damgası. Tanık kapalıyken bot da durdurulursa o aradaki halkaların tek tanığı dosyadır. Tanık, kurulduğu andan önceki halkaları doğrulayamaz. Rotasyon ({LOG_MAX_BYTES // (1024*1024)} MB × {LOG_BACKUP_COUNT} yedek) en eski kayıtları siler; her yeni dosya bir dönme kaydıyla başlar ve baş eksikliği ancak böyle bir kayıtla başlıyorsa rotasyon sayılır. Bütün bir eski dosyanın silinmesini dosya tek başına göremez; tanık, kendi dönme kayıtlarını sayarak görür (en eski yedeğinkini bir sonraki rotasyona kadar: o dosya o rotasyonda zaten silinecekti). Mac'teki doğrulayıcının 0 çıkış kodu, onaylı geçmişin gerçek olduğunu kanıtlamaz; onayın sahtesini yalnızca tanık ayırt eder.
+2. Denetim izi beş kez bağımsız bir incelemeyle kırılmaya çalışıldı (Ekim 2026: zincir ve tanık iki kez, ayrı tanık hesabı bir kez, makine dışı çapa iki kez); bulunanlar kapatıldı ya da yukarıda sınır olarak yazıldı. Sistemin geri kalanı için kırmızı takım değerlendirmesi yapılmadı: testler kontrollerin yazıldığı gibi çalıştığını doğrular, kararlı bir saldırgana karşı yeterli olduğunu değil.
 3. Hafıza türlerini ayrıştır: şema `fact` ve `context` türlerini tanımlıyor ama hepsi `preference` olarak yazılıyor.
 4. RAG benzerlik eşiği (`RAG_MIN_SCORE`) tek bir veri kümesine göre seçildi; içerik değişirse ayarlanmalı.
 ## Not
@@ -787,6 +807,7 @@ def build_health_report() -> str:
         build_rag_health(),
         build_sovereign_health(),
         build_denetim_izi_health(),
+        build_capa_health(),
     ]
     return format_health_report(checks, OBSERVABILITY.last_command_summary())
 
@@ -894,7 +915,21 @@ def denetim_tanigi_ozeti(dosya_raporu=None) -> tuple[str, bool]:
 
 
 def iz_dogrulama_raporu() -> tuple[str, str]:
-    """(/iz_dogrula metni, denetim satiri icin kisa durum)."""
+    """(/iz_dogrula metni, denetim satiri icin kisa durum) -- capa dahil."""
+    metin, durum = _iki_tanik_raporu()
+    if CAPA_ACIK:
+        try:
+            cr = capa_raporu(imza_sayisi=None)
+            metin += "\n\n" + capa.rapor_metni(cr)
+            durum += f" capa={'tutuyor' if cr.saglam else 'tutmuyor'}:{len(cr.capalar)}"
+        except Exception as e:
+            metin += f"\n\n⚠️ Çapalar okunamadı: {' '.join(str(e).split())[:160]}"
+            durum += " capa=okunamadi"
+    return metin, durum
+
+
+def _iki_tanik_raporu() -> tuple[str, str]:
+    """(/iz_dogrula metninin iki tanik kismi, kisa durum)."""
     if not AUDIT_AYRI_DOSYADA:
         return ("Denetim izi ayrı bir dosyada tutulmuyor; zincir ve tanık yok.",
                 "zincir_yok")
@@ -928,6 +963,219 @@ def denetim_zinciri_raporu():
     # basliyorsa rotasyondur. Kac dosyanin gitmis olmasi gerektigini tanik
     # bilir: yedek sayisi karsilastirmaya verilir (denetim_tanigi_karsilastirmasi).
     return audit_chain.dogrula_dosyalar(audit_chain.dosyalari_sirala(AUDIT_LOG_FILE))
+
+
+# ── MAKINE DISI CAPA ─────────────────────────────────────────────────────────
+#
+# Iki tanik ayni makinede: makineye erisen biri ikisini birlikte yeniden
+# yazabilir. Zincirin ucu belli araliklarla disaridaki bir zaman damgasi
+# otoritesine (RFC 3161) damgalatilir; imzali makbuzun kopyasi sahibine
+# Telegram'dan gider. Ayrinti: capa.py. MITRE ATT&CK M1029.
+#
+# Capa basarili olunca ize YAZILMAZ: yazilsaydi her capa yeni bir halka
+# dogururdu ve bir sonraki saat onu capalardi -- bos bir sistem gunde 24
+# mesaj atardi. Capanin kaydi makbuzun kendisidir. Basarisizlik ise ize
+# yazilir: o bir olaydir ve bir sonraki saat yeniden denenir.
+CAPA_TSA = os.getenv("VASI_CAPA_TSA", capa.VARSAYILAN_TSA).strip()
+CAPA_ARALIK_SN = max(300, int(os.getenv("VASI_CAPA_ARALIK_SN", "3600")))
+CAPA_DIZINI = Path(os.getenv("VASI_CAPA_DIZINI", str(Path(AUDIT_LOG_FILE).parent / "capa")))
+CAPA_SERTIFIKA_DIZINI = Path(os.getenv(
+    "VASI_CAPA_SERTIFIKA_DIZINI",
+    str(Path(__file__).resolve().parent / "scripts" / "capa" / "freetsa")))
+CAPA_ACIK = AUDIT_AYRI_DOSYADA and bool(CAPA_TSA)
+_CAPA_GONDERILENLER = ".telegrama_gonderilenler"
+_CAPA_GERI_GONDERME_SINIRI = 24     # yeniden baslatmada en fazla bu kadar eski kopya gonderilir
+_capa_kilidi = threading.Lock()
+_capa_gorevleri: set = set()
+_capa_gonderim_kilidi = None    # asyncio.Lock: ilk kullanimda, dongunun icinde kurulur
+
+
+def capa_at(neden: str):
+    """Zincirin ucunu damgalatir ve makbuzu saklar.
+
+    Donus: (makbuz yolu, Makbuz) ya da None (kapali / yeni halka yok).
+    Hata: capa.CapaHatasi -- cagiran ize yazar.
+    """
+    if not CAPA_ACIK or _audit_yazici is None:
+        return None
+    with _capa_kilidi:
+        _audit_yazici.acquire()
+        try:
+            # Yazicinin HAFIZASINDAKI uc: dosyadaki degil. Bot calisirken
+            # dosyaya disaridan dokunulduysa dogru olan yazicinin bildigidir.
+            sira, oz = _audit_yazici.son_sira, _audit_yazici.son_ozet
+        finally:
+            _audit_yazici.release()
+        if sira < 1:
+            return None
+        # Ayni uc zaten capaliysa tekrar etme. Klasorde daha ileri sirali
+        # bir capa olmasi (zincir kesilmis ya da biri dosya birakmis)
+        # capalamayi DURDURMAZ: bu ucu da capalariz, dogrulayici celiskiyi soyler.
+        if any(c.sira == sira and c.ozet == oz for c in capa.makbuzlari_oku(CAPA_DIZINI)):
+            return None
+        ad, tsr, makbuz = capa.damgala(CAPA_TSA, sira, oz, CAPA_SERTIFIKA_DIZINI)
+        yol = capa.kaydet(CAPA_DIZINI, ad, tsr)
+    logger.info(f"⚓ Çapa atıldı ({neden}): sıra {sira} · "
+                f"{makbuz.zaman:%Y-%m-%d %H:%M:%S} UTC · imza: {makbuz.imza}")
+    return yol, makbuz
+
+
+def _capa_gonderilenler() -> set:
+    try:
+        return set((CAPA_DIZINI / _CAPA_GONDERILENLER).read_text(encoding="utf-8").split())
+    except OSError:
+        return set()
+
+
+async def capa_kopyalarini_gonder(bot) -> int:
+    """Telegram'a henuz gitmemis makbuzlari sahibine gonderir. Gonderilen sayisi.
+
+    Kopya, capanin asil degeri: makinedeki makbuzu silen biri, sahibin
+    telefonundakine ulasamaz. Gonderilemezse bir sonraki denemede tekrar.
+    """
+    if not CAPA_ACIK:
+        return 0
+    global _capa_gonderim_kilidi
+    if _capa_gonderim_kilidi is None:
+        _capa_gonderim_kilidi = asyncio.Lock()
+    async with _capa_gonderim_kilidi:       # saatlik, onay ve kapanis ayni anda gonderemesin
+        return await _capa_kopyalarini_gonder(bot)
+
+
+async def _capa_kopyalarini_gonder(bot) -> int:
+    gitti = _capa_gonderilenler()
+    # En eskiden baslayarak, turda en fazla N: birikmis kopyalar kaybolmaz,
+    # sonraki turlarda gider (saglik o sure boyunca "gitmedi" der).
+    bekleyen = [c for c in capa.makbuzlari_oku(CAPA_DIZINI) if Path(c.dosya).name not in gitti]
+    sayi = 0
+    for c in bekleyen:
+        if sayi >= _CAPA_GERI_GONDERME_SINIRI:
+            break
+        yol = CAPA_DIZINI / c.dosya
+        try:
+            tsr = yol.read_bytes()
+            m = capa.makbuz_coz(tsr)
+        except Exception as e:
+            # Bozuk bir dosya digerlerini DURDURMAMALI (bagimsiz inceleme).
+            logger.warning(f"⚠️ Çapa makbuzu okunamadı, atlandı ({c.dosya}): {e}")
+            continue
+        try:
+            await bot.send_document(
+                chat_id=MY_TELEGRAM_ID, document=tsr, filename=Path(c.dosya).name,
+                caption=(f"⚓ Çapa · sıra {c.sira} · özet {c.ozet[:12]}… · "
+                         f"{m.zaman:%Y-%m-%d %H:%M:%S} UTC\n"
+                         f"Bu makbuzu sakla: makine silinse bile zincirin sıra "
+                         f"{c.sira}'e kadar değişmediğini kanıtlar. Dosyayı indir ya "
+                         f"da Kayıtlı Mesajlar'a ilet: bot kendi mesajını sonradan "
+                         f"değiştirebilir. 'Düzenlendi' görünen bir makbuza güvenme."),
+                disable_notification=True,
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ Çapa kopyası Telegram'a gönderilemedi ({c.dosya}): {e}")
+            break
+        with open(CAPA_DIZINI / _CAPA_GONDERILENLER, "a", encoding="utf-8") as f:
+            f.write(Path(c.dosya).name + "\n")
+        sayi += 1
+    return sayi
+
+
+async def capa_at_ve_gonder(bot, neden: str) -> None:
+    """Capa atar (gerekiyorsa) ve bekleyen kopyalari gonderir. Asla firlatmaz."""
+    if not CAPA_ACIK:
+        return
+    try:
+        await asyncio.to_thread(capa_at, neden)
+    except Exception as e:
+        hata = " ".join(str(e).split())[:200]
+        logger.warning(f"⚠️ Çapa atılamadı ({neden}): {hata}")
+        audit_event("capa_atilamadi", SISTEM_KIMLIGI, f"{neden}: {hata}")
+    try:
+        await capa_kopyalarini_gonder(bot)
+    except Exception as e:
+        logger.warning(f"⚠️ Çapa kopyaları gönderilemedi: {e}")
+
+
+def capa_arka_planda(context, neden: str) -> None:
+    """capa_at_ve_gonder'i bekletmeden baslatir (komut cevabini geciktirmez)."""
+    if not CAPA_ACIK:
+        return
+    gorev = asyncio.get_running_loop().create_task(capa_at_ve_gonder(context.bot, neden))
+    _capa_gorevleri.add(gorev)
+    gorev.add_done_callback(_capa_gorevleri.discard)
+
+
+async def _capa_dongusu(app) -> None:
+    await asyncio.sleep(60)     # acilis denetimi ize dussun, sonra capala
+    while True:
+        await capa_at_ve_gonder(app.bot, "saatlik")
+        await asyncio.sleep(CAPA_ARALIK_SN)
+
+
+async def _capa_baslat(app) -> None:
+    if CAPA_ACIK:
+        app.bot_data["capa_dongusu"] = asyncio.get_running_loop().create_task(_capa_dongusu(app))
+
+
+async def _capa_kapat(app) -> None:
+    """Kapanista son bir capa: bot dururken yapilan mudahalenin oncesi capali kalsin."""
+    gorev = app.bot_data.pop("capa_dongusu", None)
+    if gorev is not None:
+        gorev.cancel()
+    if CAPA_ACIK:
+        try:
+            await asyncio.wait_for(capa_at_ve_gonder(app.bot, "kapanis"), timeout=8)
+        except Exception as e:
+            logger.warning(f"⚠️ Kapanış çapası tamamlanamadı: {e}")
+
+
+def capa_raporu(imza_sayisi: int | None = 24, dosya_r=None):
+    """Makbuzlarin zincirle karsilastirmasi; capa kapaliysa None.
+
+    /saglik yalnizca son 24 makbuzun imzasini dogrular (ozet ve sira HER
+    makbuzda kontrol edilir); /iz_dogrula hepsini.
+    """
+    if not CAPA_ACIK:
+        return None
+    if dosya_r is None:
+        dosya_r = denetim_zinciri_raporu()
+    dosya = {s: o for s, o, _k, _g in dosya_r.halkalar}
+    govdeler = {s: g for s, _o, _k, g in dosya_r.halkalar}
+    tanik = None
+    t = getattr(_audit_yazici, "tanik", None)
+    if t is not None:
+        try:
+            tanik = {s: o for s, o, _g, _z in t.halkalar()}
+        except Exception:
+            tanik = None
+    return capa.capalari_dogrula(
+        CAPA_DIZINI, dosya, tanik, sertifika_dizini=CAPA_SERTIFIKA_DIZINI,
+        aralik_sn=CAPA_ARALIK_SN, imza_sayisi=imza_sayisi,
+        zincir_son_sira=dosya_r.son_sira, govdeler=govdeler,
+        onaylar=capa.onayli_bulgular(dosya_r))
+
+
+def build_capa_health() -> HealthCheck:
+    if not AUDIT_AYRI_DOSYADA:
+        return HealthCheck("Çapa", "warn", details="yok (denetim izi ayrı dosyada değil)")
+    if not CAPA_TSA:
+        return HealthCheck("Çapa", "warn",
+                           details="kapalı: zincirin ucu makine dışına çapalanmıyor (VASI_CAPA_TSA boş)")
+    try:
+        r = capa_raporu()
+    except Exception as e:
+        return HealthCheck("Çapa", "warn", details=f"okunamadı: {' '.join(str(e).split())[:120]}")
+    satir = capa.ozet_satiri(r)
+    if not CAPA_SERTIFIKA_DIZINI.joinpath("tsa.crt").exists():
+        satir += " · TSA sertifikası depoda yok"
+    gitti = _capa_gonderilenler()
+    gitmeyen = sum(1 for c in r.capalar if Path(c.dosya).name not in gitti)
+    tamam = (r.saglam and not r.uyarilar and r.son is not None
+             and r.imzasi_dogrulanan > 0 and gitmeyen == 0)
+    if gitmeyen:
+        satir += f" · {gitmeyen} makbuz henüz Telegram'a gitmedi"
+    if r.uyarilar:
+        satir += " · " + r.uyarilar[0]
+    return HealthCheck("Çapa", "ok" if tamam else "warn", details=satir)
 
 def get_ollama_model_names() -> list[str]:
     response = ollama_client.list()
@@ -2212,6 +2460,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             kapsam = pending["kapsam"]
             ayrinti = audit_chain.onay_ayrintisi(kapsam, pending.get("kimlikler", []))
             audit_event("iz_onaylandi", user_id, ayrinti, max_len=len(ayrinti))
+            # Onay, insanin "gordum" dedigi an: o ana kadarki zincir hemen
+            # makine disina capalanir. Saatlik capayi beklemez.
+            capa_arka_planda(context, "onay")
             result = (
                 f"✔ Onaylandı: {pending['bulgu']} bulgu (kapsam sıra ≤ {kapsam}).\n\n"
                 f"Geçmiş silinmedi: /iz_dogrula onu 'onaylanmış geçmiş' olarak "
@@ -2467,7 +2718,15 @@ if __name__ == "__main__":
 
         logger.info("="*60)
         
-        app = Application.builder().token(TOKEN).build()
+        if CAPA_ACIK:
+            _tsa_sertifikasi = ("depoda" if CAPA_SERTIFIKA_DIZINI.joinpath("tsa.crt").exists()
+                                else "DEPODA YOK: imzalar doğrulanmayacak")
+            logger.info(f"⚓ Çapa: {CAPA_TSA} · her {CAPA_ARALIK_SN // 60} dk · "
+                        f"{CAPA_DIZINI} · TSA sertifikası {_tsa_sertifikasi}")
+        else:
+            logger.warning("⚠️ Çapa kapalı: zincirin ucu makine dışına çapalanmıyor")
+
+        app = Application.builder().token(TOKEN).post_init(_capa_baslat).post_stop(_capa_kapat).build()
         app.add_handler(CommandHandler("start", observed_command("start", cmd_start)))
         app.add_handler(CommandHandler("yardim", observed_command("yardim", cmd_yardim)))
         app.add_handler(CommandHandler("liste", observed_command("liste", cmd_liste)))

@@ -36,6 +36,11 @@ def vasi_module(tmp_path, monkeypatch):
     # Ayni ilke ikinci tanik icin: testler gercek veritabanina baglanmaz.
     # Parolaya ihtiyac duyan testler onu kendisi ayarliyor (test_memory).
     monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
+    # Ayni ilke capa icin: testler disaridaki zaman damgasi otoritesine
+    # istek atmaz, gercek makbuz klasorune yazmaz. Capayi sinayan testler
+    # sahte bir TSA ile kendisi acar (test_capa.py).
+    monkeypatch.setenv("VASI_CAPA_TSA", "")
+    monkeypatch.setenv("VASI_CAPA_DIZINI", str(tmp_path / "capa"))
 
     repo_root = Path(__file__).resolve().parents[1]
     if str(repo_root) not in sys.path:

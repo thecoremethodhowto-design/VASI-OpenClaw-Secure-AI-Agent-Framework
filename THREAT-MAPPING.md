@@ -908,6 +908,7 @@ hatırlamıyordu.
 | Özet zinciri | Her satır bir öncekinin SHA-256 özetini taşır. Bot çalışırken yapılan bir değişiklik, yazıcının bir sonraki satırında ele verilir | Bot dururken sondan koparılan ya da baştan hesaplanan satırlar |
 | İkinci tanık | Her halka PostgreSQL'de ayrıca saklanır; silinen satırın ne olduğu ve ne zaman yazıldığı söylenir. Bot tanıkta yalnızca ekleyebilir | Makineye ve veritabanının süper kullanıcısına erişen biri |
 | Onay | Bulgu silinmez; kimliğiyle onaylanır ve onay da zincire yazılır | — |
+| Makine dışı çapa | Zincirin ucu saatte bir, her onayda ve kapanışta dışarıdaki bir zaman damgası otoritesine imzalatılır (RFC 3161, `capa.py`); makbuzun kopyası Telegram'dan sahibine gider | Son çapadan sonra yazılan halkalar |
 
 **Tasarım notu — neden gizli anahtar yok:** Özetler anahtarsızdır;
 dosyayı değiştirebilen biri bütün özetleri de yeniden hesaplayabilir.
@@ -915,8 +916,9 @@ Sabit bir gizli anahtar bunu çözmez: anahtar da aynı makinede durur,
 dosyayı değiştirebilen anahtarı da okuyabilir. Schneier ve Kelsey'in
 yöntemi (her satırda değişen, eskisi silinen anahtar) ele geçirilmeden
 önce yazılan satırları korur; sondan koparılanı görmek için ise yine
-makinenin dışında tutulan bir kayıt gerekir. Bu adım henüz yok: ikinci
-kopya ayrı bir bileşende, aynı makinedeki PostgreSQL'de tutulur.
+makinenin dışında tutulan bir kayıt gerekir. Ekim 2026'dan beri bu kayıt
+var: zincirin ucu, makinede değil dış bir kurumda duran bir anahtarla
+imzalanır (makine dışı çapa). Anahtar yine yok: imzayı atan biz değiliz.
 
 **Tasarım notu — raporla, durdurma:** Tanığa ulaşılamıyorsa bot durmaz;
 dosyaya yazmaya devam eder, sağlık raporunda uyarır ve konteyner
@@ -1038,7 +1040,11 @@ imajla çalışıyordu. Artık hiçbir şey doğrulayamadığında ayrı bir kod
    birlikte yeniden yazabilir; daha ucuzu, ikisini birlikte eski bir
    hâline döndürebilir (dosyayı tanık öncesine kesip tabloyu silmek "ilk
    kurulum"dan ayırt edilemez) ya da ikisine birden sahte bir onay
-   ekleyebilir (onay anahtarsızdır). Çıta yükseldi; kapanmadı.
+   ekleyebilir (onay anahtarsızdır). Çıta yükseldi; kapanmadı. Makine
+   dışı çapadan sonra bunlar **çapalanmış halkalar için** yakalanır
+   (`test_capalanmis_halka_yeniden_yazilirsa_yakalaniyor`,
+   `test_zincirin_sonu_kesilirse_yakalaniyor`); son çapadan sonrası için
+   geçerliliğini korur (8. madde).
 2. **Tanık ancak gördüğüne tanıklık eder.** Tanık kapalıyken bot da
    durdurulursa aradaki satırların tek tanığı dosyadır; bot dururken
    silinirlerse iki kopya yine uyuşur.
@@ -1064,6 +1070,21 @@ imajla çalışıyordu. Artık hiçbir şey doğrulayamadığında ayrı bir kod
    doğrulayıcı göremez, tanık görür. En eski yedeği erken silmek ise bir
    sonraki rotasyondan sonra meşru rotasyondan ayırt edilemez; tanık o
    satırları yine de saklar.
+8. **Son çapadan sonrası korunmaz.** Çapa saatte bir atılır (her onayda
+   ve kapanışta ayrıca); aradaki halkaları makineye erişen biri yine
+   yeniden yazabilir (`test_SINIR_son_capadan_sonra_yazilan_halkalar_korunmaz`).
+9. **Makinedeki makbuzlar silinebilir; Telegram'daki kopyalar da botun
+   anahtarıyla düzenlenebilir.** Makineyi ele geçiren botun anahtarını da
+   alır: kendi gönderdiği mesajı düzenleyebilir, 48 saat içinde silebilir.
+   Kopyayı indirmek ya da Kayıtlı Mesajlar'a iletmek bunu kapatır.
+   Makinedeki makbuzlar silinebilir. Sahtesi üretilemez, ama
+   silinirse makinedeki doğrulayıcı yalnızca "çapa yok / gecikti" diye
+   uyarır. Bulguyu sahibin Telegram'daki kopyası çıkarır
+   (`test_SINIR_makinedeki_makbuzlar_silinebilir_telegram_kopyasi_yakalar`):
+   `python3 capa.py denetim/denetim.log --capa denetim/capa --capa <indirilen kopyalar>`.
+10. **Çapa tek bir dış kuruma güvenir.** Varsayılan freeTSA. İmzayı
+    depodaki sertifika doğrular (`scripts/capa/freetsa/`); kurum
+    güvenilmez çıkarsa ya da kapanırsa çapalar o kurum kadar güvenilirdir.
 
 **Atılan adım (Ekim 2026):** tanığa yalnızca ekleme yetkisi olan ayrı
 bir veritabanı hesabı. PostgreSQL'de bir nesneyi silme hakkı sahibinde
@@ -1085,8 +1106,42 @@ kullanıcı parolası botun ortamından (`.env`) `postgres.env`'e taşındı.
 > kullanıcınınkiyle aynıysa ayrı hesap hiçbir şey korumuyordu. Hepsi önce
 > teste yazıldı, sonra kapatıldı.
 
-**Sıradaki adım:** zincirin ucunu bu makinenin dışına bağlamak (MITRE
-ATT&CK M1029, Remote Data Storage).
+**Atılan ikinci adım (Ekim 2026): makine dışı çapa** (MITRE ATT&CK
+M1029, Remote Data Storage). Saatte bir (yeni halka varsa), her onayda ve
+kapanışta zincirin ucu — sıra ve özet — bir zaman damgası otoritesine
+gönderilir (RFC 3161). Dönen makbuz, dış kurumun anahtarıyla imzalıdır:
+"bu özet şu saatte vardı". Makbuz `denetim/capa/` altında saklanır ve bir
+kopyası Telegram'dan sahibine gider. `/saglik` ve `/iz_dogrula` her
+çapayı zincirin iki kopyasıyla karşılaştırır. Yakaladıkları: çapalanmış
+bir halkanın yeniden yazılması, zincirin sonunun kesilmesi, aynı sıraya
+iki farklı çapa, zaman sırası bozuk çapalar, sahte ya da bozuk makbuz.
+Başarılı çapa ize yazılmaz (yazılsaydı her çapa yeni bir halka doğurur,
+boş bir sistem saatte bir mesaj atardı); başarısızlık yazılır.
+
+> **Çapa da incelendi.** İşi görmemiş ayrı bir yapay zekâ ajanı ilk sürümü
+> kırdı; üç yoldan çapalı geçmiş yeniden yazılıp doğrulayıcı yine "✅"
+> diyordu: (1) çapa, halkanın yalnızca özet alanına bakıyordu — gövdesi
+> değiştirilip özeti bırakılan satır geçiyordu; (2) çapalı bir halkanın
+> silinmesi ve sahte bir rotasyon kaydı "bilgi" sayılıyordu; (3) çapalı
+> aralıktaki bir değişiklik, çapasız pencereye eklenmiş sahte bir onayla
+> gizlenebiliyordu. Ayrıca dört baytlık bozuk bir makbuz dosyası hem
+> doğrulayıcıyı düşürüyor hem Telegram kopyalarını durduruyordu. Kapatıldı:
+> çapalı halka yeniden hesaplanır; silinmesi bulgu, dosyaların başından
+> gitmesi uyarıdır ("tutuyor" denmez, çıkış 3); çapadan sonra verilen onay
+> uyarı olarak sorulur; doğrulayıcı zincirin kendisini de denetler; bozuk
+> makbuz bulgu olur ve diğerlerini durdurmaz. Hepsi önce teste yazıldı.
+> Kapanmayan: botun anahtarı makinede olduğundan, Telegram'daki kopyalar
+> botun anahtarıyla düzenlenebilir ya da (48 saat içinde) silinebilir.
+> Düzenlenen mesaj Telegram'da "düzenlendi" etiketi taşır; halkasından çok
+> sonra damgalanmış makbuz uyarı verir. Asıl koruma, kopyayı indirmek ya da
+> Kayıtlı Mesajlar'a iletmektir. Düzeltmeler ikinci kez incelendi: çapalı
+> geçmişi gizleyen yeni bir yol bulunmadı; ama düzeltmenin kendisi her
+> gerçek onayda kalıcı bir uyarı bırakıyordu (uyarıya alışan sahip gerçek
+> saldırıyı da görmez). Artık yalnızca içerik değişikliği türündeki
+> bulguların (değiştirilmiş, eksik, eklenmiş) çapadan sonraki onayı sorulur.
+
+**Sıradaki adım:** çapayı tek bir kuruma bağlı olmaktan çıkarmak (ikinci
+bir TSA ya da OpenTimestamps ile Bitcoin'e bağlamak).
 
 ---
 
@@ -1096,9 +1151,9 @@ ATT&CK M1029, Remote Data Storage).
 ./test.sh
 ```
 
-Beklenen: 660 test geçer, 21 test atlanır: gerçek veritabanı isteyen 19
-(`VASI_TEST_PG` verilmezse) ve örnek dosyaları okuyan 2 (`.env.example`
-gibi dosyalar imaja kopyalanmaz; `YEREL=1 ./test.sh` ile çalışırlar).
+Beklenen: 708 test geçer, 22 test atlanır: gerçek veritabanı isteyen 19
+(`VASI_TEST_PG` verilmezse) ve imaja kopyalanmayan dosyaları okuyan 3
+(`.env.example`, `Dockerfile` gibi; `YEREL=1 ./test.sh` ile çalışırlar).
 
 Gerçek veritabanı testleri konteynerde de çalışır. Postgres'te bir kez
 boş bir test veritabanı aç, sonra süper kullanıcıyla ver:
@@ -1118,8 +1173,8 @@ Denetim izinin korumalarının gerçekten bir şey koruduğunu sınamak için:
 ./kanit.sh
 ```
 
-Beklenen son satır: `76 bozma · 76 tanesi yakalandı · 10 atlandı`
-(gerçek veritabanıyla, `VASI_TEST_PG` verilince: `86 bozma · 86 tanesi yakalandı`).
+Beklenen son satır: `103 bozma · 103 tanesi yakalandı · 10 atlandı`
+(gerçek veritabanıyla, `VASI_TEST_PG` verilince: `113 bozma · 113 tanesi yakalandı`).
 
 ---
 
@@ -1136,10 +1191,11 @@ amaçlar. Aşağıdakiler bilinen boşluklardır:
    değil. Politika konteyner imajına gömülü olduğu için bu ayrım
    normalde görünmez; `policies/` dışarıdan bağlanırsa ikisi
    ayrışabilir ve denetçi bunu içeriden göremez (Kontrol 13)
-4. Denetim izinin iki tanığı da aynı makinede; bot tanığı silemez ama
-   makineye ve veritabanının süper kullanıcısına erişen biri yakalanmaz
+4. Denetim izinin iki tanığı da aynı makinede; bot tanığı silemez.
+   Makineye ve veritabanının süper kullanıcısına erişen biri, çapalanmış
+   halkalarda yakalanır; son çapadan sonra yazılanlarda yakalanmaz
    (Kontrol 14)
-5. Kapsamlı bir kırmızı takım değerlendirmesi yapılmadı. Denetim izi üç
+5. Kapsamlı bir kırmızı takım değerlendirmesi yapılmadı. Denetim izi beş
    bağımsız yapay zekâ incelemesinden geçti ve her birinde açık bulundu
    (Kontrol 14); bu bir sızma testinin yerini tutmaz. Testler
    kontrollerin yazıldığı gibi çalıştığını doğrular, kararlı bir
@@ -1161,6 +1217,8 @@ Referans çerçeveler:
 - [MITRE ATT&CK](https://attack.mitre.org)
   — [T1070, Indicator Removal](https://attack.mitre.org/techniques/T1070)
   · [M1029, Remote Data Storage](https://attack.mitre.org/mitigations/M1029)
+- [RFC 3161, Time-Stamp Protocol](https://www.rfc-editor.org/rfc/rfc3161)
+  · [freeTSA](https://freetsa.org/)
 - [MITRE ATLAS](https://atlas.mitre.org)
 - [OWASP Top 10 for LLM Applications](https://genai.owasp.org/llmrisk/llm01-prompt-injection/)
 - Schneier ve Kelsey, [Secure Audit Logs to Support Computer Forensics](https://www.schneier.com/academic/archives/1999/05/secure_audit_logs_to.html) (1999)

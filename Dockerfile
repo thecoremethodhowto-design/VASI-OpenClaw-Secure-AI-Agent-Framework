@@ -30,12 +30,15 @@ COPY sovereign.py .
 COPY sovereign_store.py .
 COPY audit_chain.py .
 COPY audit_store.py .
+COPY capa.py .
 COPY kanit.py .
 COPY litellm ./litellm
 # Testler icin: compose dosyasindaki sir ayrimi ve tanik kurulum betigi
 # testlerle sinaniyor (tests/test_tanik_hesabi.py). Ikisinde de sir yok.
 COPY docker-compose.yml .
 COPY scripts/postgres ./scripts/postgres
+# Capa: TSA sertifikasi imzalari dogrulamak icin (scripts/capa/README.md)
+COPY scripts/capa ./scripts/capa
 
 # Security: Non-root user oluştur
 RUN useradd -m -u 1000 vasi && chown -R vasi:vasi /app
