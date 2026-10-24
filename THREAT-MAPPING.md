@@ -1139,8 +1139,8 @@ amaçlar. Aşağıdakiler bilinen boşluklardır:
 4. Denetim izinin iki tanığı da aynı makinede; bot tanığı silemez ama
    makineye ve veritabanının süper kullanıcısına erişen biri yakalanmaz
    (Kontrol 14)
-5. Kapsamlı bir kırmızı takım değerlendirmesi yapılmadı. Denetim izi iki
-   bağımsız yapay zekâ incelemesinden geçti ve ikisinde de açık bulundu
+5. Kapsamlı bir kırmızı takım değerlendirmesi yapılmadı. Denetim izi üç
+   bağımsız yapay zekâ incelemesinden geçti ve her birinde açık bulundu
    (Kontrol 14); bu bir sızma testinin yerini tutmaz. Testler
    kontrollerin yazıldığı gibi çalıştığını doğrular, kararlı bir
    saldırgana karşı yeterli olduğunu değil

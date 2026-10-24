@@ -338,7 +338,7 @@ docker run --rm -v "$(pwd)":/work -w /work python:3.11-slim \
 
 `requirements.txt` dosyasini elle duzenlemeyin; uretilmis bir kilit dosyasidir.
 
-## Test Checklist (Video Icin)
+## Test Checklist 
 
 1. `/start` ile komut menusu geliyor mu?
 2. `/guvenlik` ile deterministik rapor donuyor mu?

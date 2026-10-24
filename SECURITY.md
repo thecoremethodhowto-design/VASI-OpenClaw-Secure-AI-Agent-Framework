@@ -156,8 +156,8 @@ python3 audit_chain.py denetim/denetim.log
 Şeffaflık adına, bilinen boşluklar açıkça listelenir:
 
 - Kapsamlı bir kırmızı takım (red team) değerlendirmesi yapılmamıştır.
-  Denetim izi iki kez, işi görmemiş bağımsız bir yapay zekâ incelemesinden
-  geçti ve iki seferde de açık bulundu; bu, bir sızma testinin yerini
+  Denetim izi üç kez, işi görmemiş bağımsız bir yapay zekâ incelemesinden
+  geçti ve her seferinde açık bulundu; bu, bir sızma testinin yerini
   tutmaz. Testler kontrollerin yazıldığı gibi çalıştığını doğrular,
   kararlı bir saldırgana karşı yeterli olduğunu değil
 - Denetim izinin iki tanığı da aynı makinededir. Bot tanığı silemez
